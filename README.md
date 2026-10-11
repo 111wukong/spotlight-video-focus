@@ -1,5 +1,14 @@
 # Spotlight · 视频单人聚焦
 
+<p>
+  <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="License" />
+  <img src="https://img.shields.io/badge/python-3.14%2B-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python" />
+  <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-000000?style=flat-square&logo=apple&logoColor=white" alt="macOS" />
+  <img src="https://img.shields.io/badge/MLX-Metal-FF6F00?style=flat-square" alt="MLX" />
+  <img src="https://img.shields.io/badge/SAM%202.1-Segment%20Anything-6E4AFF?style=flat-square" alt="SAM 2.1" />
+  <img src="https://img.shields.io/badge/ffmpeg-VideoToolbox-007808?style=flat-square&logo=ffmpeg&logoColor=white" alt="ffmpeg" />
+</p>
+
 选中一个人，整段视频只让他清晰——其余所有人和背景一律虚化。
 手持跟拍、镜头运动、目标走出画面再回来，都尽量跟住同一个人，不中途换人。
 
@@ -8,7 +17,33 @@
 
 ---
 
-## 快速开始
+## 效果演示
+
+下面全部是**本机实拍** —— 不是效果图，是同一套脚本跑出来的成片。
+
+**左右对比**（左：原片，右：处理后）
+
+| 场景 | 看什么 | 链接 |
+|---|---|---|
+| 单人手持跟拍 | 镜头一直动，目标一直清晰、不换人 | ▶️ [左右对比 · boy](demo/左右对比_boy.mp4) |
+| 人群场景 | 一堆人里只留目标，其余全部虚化 | ▶️ [左右对比 · crowd](demo/左右对比_crowd.mp4) |
+
+**清除旁人**（把除目标外的所有人抹掉，用重建出来的背景补上）
+
+| 场景 | 看什么 | 链接 |
+|---|---|---|
+| 人群 | 背景是重建的、全程清晰，不是虚化 | ▶️ [清除旁人 · 人群](demo/清除旁人_人群.mp4) |
+| 桌面 | 单应矩阵处理平面场景的典型效果 | ▶️ [清除旁人 · 桌面](demo/清除旁人_桌面.mp4) |
+
+**界面**：导入 → 拖到目标最清楚的时刻 → 点一下 → 立刻看抠像预览
+
+<img src="demo/界面预览.png" alt="Spotlight 界面预览" width="100%">
+
+> GitHub 不支持在 README 里直接播放视频，点上面表格里的链接即可查看（或下载原片）。
+
+---
+
+## 快速开始## 快速开始
 
 ```bash
 cd spotlight
