@@ -172,6 +172,13 @@ def cmd_doctor(a) -> int:
          "已就绪（清除旁人可选 --clean-inpaint-model diffusion）" if diff else
          "未下载（可选：spotlight download --preset diffusion，质量更高但慢）")
 
+    from .depth import resolve_depth
+
+    dep = resolve_depth(a.models)
+    line("深度估计模型", dep is not None,
+         f"{dep.stat().st_size/1e6:.0f} MB（真景深虚化 / 深度辅助重建）" if dep else
+         "未下载（可选：spotlight download --preset depth，约 94 MB）")
+
     from .segmenter import Segmenter, resolve_checkpoint
 
     for preset in Segmenter.PRESETS:
@@ -216,6 +223,9 @@ def cmd_download(a) -> int:
     if a.preset == "diffusion":
         return _download_diffusion(models_dir, a.force)
 
+    if a.preset == "depth":
+        return _download_depth(models_dir, a.force)
+
     presets = list(Segmenter.PRESETS) if a.preset == "all" else [a.preset]
     for preset in presets:
         spec = Segmenter.PRESETS[preset]
@@ -234,6 +244,7 @@ def cmd_download(a) -> int:
     if a.preset == "all":
         rc = max(rc, _download_lama(models_dir, a.force))
         rc = max(rc, _download_diffusion(models_dir, a.force))
+        rc = max(rc, _download_depth(models_dir, a.force))
     return rc
 
 
@@ -357,6 +368,37 @@ def _download_lama(models_dir: Path, force: bool) -> int:
     return 1
 
 
+def _download_depth(models_dir: Path, force: bool) -> int:
+    """下载深度估计模型（Depth Anything V2 Small，ONNX，约 94 MB）。"""
+    from .depth import resolve_depth
+
+    if resolve_depth(models_dir) is not None and not force:
+        print(f"  · 深度模型已存在，跳过（{resolve_depth(models_dir)}）")
+        return 0
+    dest = models_dir / "depth"
+    dest.mkdir(parents=True, exist_ok=True)
+    repo = "onnx-community/depth-anything-v2-small"
+    token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    endpoint = os.environ.get("HF_ENDPOINT") or "https://huggingface.co"
+    files = ("config.json", "preprocessor_config.json", "onnx/model.onnx")
+    print(f"  · 下载深度模型 ← {repo}（约 94 MB，用于景深虚化与深度辅助重建）")
+    ok = True
+    for rel in files:
+        target = dest / rel
+        if force and target.is_file():
+            target.unlink()
+        url = f"{endpoint.rstrip('/')}/{repo}/resolve/main/{rel}"
+        print(f"    ↓ {rel}", flush=True)
+        if not _curl_download_file(url, target, token):
+            ok = False
+            print(f"    ✗ 失败 {rel}")
+    if ok:
+        print(f"    ✓ {dest}")
+        return 0
+    print("    ✗ 失败（检查网络/代理后重试）")
+    return 1
+
+
 def _download_diffusion(models_dir: Path, force: bool) -> int:
     """下载「清除旁人」用的扩散补洞模型（SD inpainting / diffusers 格式，约 2.6 GB）。"""
     from .inpaint_diffusion import resolve_diffusion
@@ -472,12 +514,14 @@ def cmd_run(a) -> int:
         audio=not a.no_audio,
         reid=not a.no_reid,
         remove_others=bool(a.remove_people),
+        depth_blur=bool(a.depth_blur),
     )
     if a.remove_people:
         from .cleanplate import CleanConfig
         cfg.clean = CleanConfig(segment=a.clean_segment, window=a.clean_window,
                                 dilate=a.clean_dilate, inpaint=not a.no_inpaint,
-                                inpaint_model=a.clean_inpaint_model)
+                                inpaint_model=a.clean_inpaint_model,
+                                parallax_planes=a.clean_planes)
     if a.no_reid:
         cfg.guard.identity_floor = -1.0
         cfg.guard.reanchor_score = 2.0
@@ -548,8 +592,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     dl = sub.add_parser("download", help="下载模型权重")
     dl.add_argument("--preset", default="balanced",
-                    choices=["turbo", "fast", "balanced", "quality", "lama", "diffusion", "all"],
-                    help="lama = 「清除旁人」LaMa 修复模型；diffusion = 扩散补洞模型(SD inpainting，数 GB)；all = 全部")
+                    choices=["turbo", "fast", "balanced", "quality", "lama", "diffusion", "depth", "all"],
+                    help="lama = 「清除旁人」LaMa 修复模型；diffusion = 扩散补洞模型；"
+                         "depth = 深度估计模型（景深虚化 / 深度辅助重建）；all = 全部")
     dl.add_argument("--models", default=str(DEFAULT_MODELS))
     dl.add_argument("--mirror", default="", help="HuggingFace 镜像（默认直连 huggingface.co）；例如 https://hf-mirror.com")
     dl.add_argument("--force", action="store_true")
@@ -592,6 +637,9 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--quality", type=int, default=60, help="videotoolbox 质量 1-100")
     r.add_argument("--no-audio", action="store_true")
     r.add_argument("--no-reid", action="store_true", help="关闭外观重识别守卫")
+    r.add_argument("--depth-blur", action="store_true",
+                   help="真景深虚化：按深度让背景近处轻、远处重，目标所在平面保持清晰"
+                        "（需先 spotlight download --preset depth）")
     r.add_argument("--remove-people", action="store_true",
                    help="把除目标外的所有人抹掉，并用重建的背景补上（清除旁人）")
     r.add_argument("--clean-segment", type=int, default=32, help="每多少帧换一张背景板（默认 32）")
@@ -604,6 +652,9 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--clean-inpaint-model", default="lama", choices=["lama", "diffusion"],
                    help="补洞模型：lama（默认·快）或 diffusion（SD inpainting·质量更高但慢，"
                         "需先 spotlight download --preset diffusion）")
+    r.add_argument("--clean-planes", type=int, default=3,
+                   help="深度辅助的多平面重建层数（1 = 关闭，默认 3）。"
+                        "按深度分层、各层各自对齐，减轻有纵深场景的视差重影；需深度模型")
     r.add_argument("-q", "--quiet", action="store_true")
     r.set_defaults(func=cmd_run)
 

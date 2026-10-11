@@ -63,8 +63,65 @@ def _fmt(v: float) -> str:
     return f"{v:.4f}".rstrip("0").rstrip(".")
 
 
-def build_filtergraph(src: VideoInfo, mask_w: int, mask_h: int, p: EffectParams) -> str:
-    """拼出 filter_complex。输入 0=原视频，1=人物掩码，2=存在门。"""
+#: 景深虚化的模糊层级数。层越多过渡越细，但每层都要多跑一路 gblur。
+#: 4 层（1 路清晰 + 3 路渐强模糊）在观感和开销之间比较平衡。
+DEPTH_LEVELS = 4
+
+
+def _depth_blur_chain(p: EffectParams, w: int, h: int,
+                      levels: int = DEPTH_LEVELS) -> tuple[list[str], str]:
+    """深度分层虚化的 filtergraph 片段。
+
+    思路：把背景同时模糊成 ``levels`` 个强度（第 0 级就是原图），
+    再用**逐像素的层级掩码**把它们叠回去——掩码来自深度视频（``[3:v]``），
+    所以近处取清晰那一路、远处取最糊那一路，中间平滑过渡。
+
+    为什么不做「按像素变 sigma」：ffmpeg 的 ``gblur`` 的 sigma 是整帧常量。
+    分层 + 逐像素掩码是流式的、内存恒定，而且能复用硬件编码那条链路。
+
+    深度视频里存的是 **模糊层级 0..255**（不是原始深度）——映射在 Python 侧
+    算好（见 :func:`spotlight.depth.to_blur_level`），ffmpeg 这边只做阈值与斜坡。
+    """
+    n_blur = max(1, int(levels) - 1)
+    # 每一级的 sigma：从 0 递增到 blur
+    sigmas = [p.blur * (k / n_blur) ** 1.15 for k in range(1, n_blur + 1)]
+    # 阈值与过渡宽度（0..255 的层级刻度）
+    step = 255.0 / (n_blur + 1)
+    soft = max(8.0, step * 0.9)
+
+    parts: list[str] = []
+    tags = [f"b{i}" for i in range(n_blur + 1)]
+    parts.append("[src_bg]split=%d%s" % (n_blur + 1, "".join(f"[{t}]" for t in tags)))
+    for k in range(1, n_blur + 1):
+        parts.append(f"[b{k}]gblur=sigma={_fmt(sigmas[k - 1])}[bg{k}]")
+
+    parts.append(f"[3:v]format=gray,scale={w}:{h}:flags=bilinear[dep]")
+    for k in range(1, n_blur + 1):
+        t = step * k - soft / 2.0
+        parts.append(
+            f"[dep]lut=y='clip((val-{_fmt(t)})/{_fmt(soft)}*255,0,255)',format=gray[c{k}]"
+        )
+
+    acc = "b0"
+    for k in range(1, n_blur + 1):
+        nxt = f"acc{k}"
+        parts.append(f"[{acc}][bg{k}][c{k}]maskedmerge=planes=7[{nxt}]")
+        acc = nxt
+    return parts, acc
+
+
+def build_filtergraph(
+    src: VideoInfo,
+    mask_w: int,
+    mask_h: int,
+    p: EffectParams,
+    has_depth: bool = False,
+) -> str:
+    """拼出 filter_complex。
+
+    输入：``0``=原视频，``1``=人物掩码，``2``=存在门，``3``=深度（可选）。
+    给了 ``has_depth`` 时，背景走「分层景深虚化」；否则维持原来的全局均匀虚化。
+    """
     w, h = src.width, src.height
 
     mask_chain = [f"scale={w}:{h}:flags=bicubic", "format=gray"]
@@ -84,13 +141,19 @@ def build_filtergraph(src: VideoInfo, mask_w: int, mask_h: int, p: EffectParams)
     if p.fg_sharpen > 0:
         fg_chain.append(f"unsharp=luma_msize_x=5:luma_msize_y=5:luma_amount={_fmt(p.fg_sharpen)}")
 
+    bg_eq = f"eq=brightness={_fmt(p.bg_brightness)}:saturation={_fmt(p.bg_saturation)}"
+
     parts: list[str] = []
-    parts.append(f"[0:v]format=yuv420p,split=3[src_bg][src_fg][src_gate]")
-    # 背景：虚化 + 轻微压暗去色
-    parts.append(
-        f"[src_bg]gblur=sigma={_fmt(p.blur)},"
-        f"eq=brightness={_fmt(p.bg_brightness)}:saturation={_fmt(p.bg_saturation)}[bg_blur]"
-    )
+    parts.append("[0:v]format=yuv420p,split=3[src_bg][src_fg][src_gate]")
+
+    # 背景：有深度就分层虚化，否则保持原来的全局均匀虚化
+    if has_depth:
+        chain, acc = _depth_blur_chain(p, w, h)
+        parts.extend(chain)
+        parts.append(f"[{acc}]{bg_eq}[bg_blur]")
+    else:
+        parts.append(f"[src_bg]gblur=sigma={_fmt(p.blur)},{bg_eq}[bg_blur]")
+
     # 存在门：maskedmerge 的掩码为 255 时取第二路输入，所以
     # 「目标在画面里（gate=255）→ 取虚化背景；不在（gate=0）→ 取原画」。
     parts.append("[src_gate][bg_blur][pg]maskedmerge=planes=7[bg_gated]")
@@ -123,10 +186,14 @@ def render(
     encoder: str = "auto",
     quality: int = 60,
     audio: bool = True,
+    depth_video: str | Path | None = None,
 ) -> None:
-    """执行合成 + 编码。"""
+    """执行合成 + 编码。
+
+    ``depth_video`` 给了就走「真景深」：背景按深度分层虚化，近处轻、远处重。
+    """
     mw, mh = mask_size
-    graph = build_filtergraph(info, mw, mh, params)
+    graph = build_filtergraph(info, mw, mh, params, has_depth=depth_video is not None)
 
     if encoder == "auto":
         encoder = "h264_videotoolbox"
@@ -136,9 +203,10 @@ def render(
         "-i", str(src_video),
         "-i", str(mask_video),
         "-i", str(gate_video),
-        "-filter_complex", graph,
-        "-map", "[vout]",
     ]
+    if depth_video is not None:
+        cmd += ["-i", str(depth_video)]
+    cmd += ["-filter_complex", graph, "-map", "[vout]"]
     if info.has_audio and audio:
         cmd += ["-map", "0:a:0?", "-c:a", "aac", "-b:a", "192k"]
     else:

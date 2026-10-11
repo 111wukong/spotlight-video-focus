@@ -367,6 +367,157 @@ def test_diffusion_shape() -> None:
     check("异尺寸掩码不会触发广播错误", normalized.shape == square.shape, str(normalized.shape))
 
 
+def test_depth_blur() -> None:
+    """景深虚化：层级映射单调 + filtergraph 分层结构正确。"""
+    from spotlight.composite import DEPTH_LEVELS, EffectParams, build_filtergraph
+    from spotlight.depth import to_blur_level
+
+    print("\n景深虚化")
+    focus = 0.6
+    # 近度：0=最远、255=最近；焦平面在 focus
+    near_u8 = np.array([[0, int(focus * 255), 255]], dtype=np.uint8)
+    level = to_blur_level(near_u8, focus_near=focus)
+    far_l, mid_l, near_l = int(level[0, 0]), int(level[0, 1]), int(level[0, 2])
+    check("焦平面完全不糊", mid_l == 0, f"焦平面层级 {mid_l}")
+    check("远处最糊", far_l == 255, f"最远层级 {far_l}")
+    check("近处只轻微失焦", 0 < near_l < 90, f"最近层级 {near_l}（应远小于 255）")
+    check("模糊层级随距离单调", far_l > mid_l and near_l > mid_l,
+          f"远 {far_l} / 焦 {mid_l} / 近 {near_l}")
+
+    # 整体缩放：焦平面越靠前，同样的远景应该得到越大的层级
+    shallow = int(to_blur_level(np.array([[60]], np.uint8), focus_near=0.9)[0, 0])
+    deep = int(to_blur_level(np.array([[60]], np.uint8), focus_near=0.3)[0, 0])
+    check("焦平面越远，远景越清晰", deep < shallow, f"focus=0.3 → {deep} < focus=0.9 → {shallow}")
+
+    class _Info:
+        width, height = 1920, 1080
+
+    graph_depth = build_filtergraph(_Info(), 1920, 1080, EffectParams(), has_depth=True)
+    graph_plain = build_filtergraph(_Info(), 1920, 1080, EffectParams(), has_depth=False)
+    check("有深度时按层级拆分背景", graph_depth.count("gblur") >= DEPTH_LEVELS,
+          f"gblur 出现 {graph_depth.count('gblur')} 次")
+    check("有深度时用第 3 路输入做层级掩码", "[3:v]" in graph_depth and "[3:v]" not in graph_plain)
+    check("有深度时逐层 maskedmerge 叠加", graph_depth.count("maskedmerge") > graph_plain.count("maskedmerge"),
+          f"{graph_depth.count('maskedmerge')} vs {graph_plain.count('maskedmerge')}")
+    check("无深度时保持单次均匀虚化", "split=4" not in graph_plain and "gblur=sigma=26" in graph_plain)
+
+
+def test_parallax_planes() -> None:
+    """多平面重建：有视差的场景下，按深度分层对齐应当优于单平面。
+
+    造一个**双平面**场景——上半屏（远）平移小、下半屏（近）平移大，
+    这正是单应矩阵搞不定的情况。有真值背景，所以能直接量出误差。
+    """
+    import cv2
+
+    from spotlight.cleanplate import (
+        CleanConfig,
+        PeopleRemover,
+        _frame_homographies,
+        _plane_homographies,
+        depth_layer_centers,
+        plane_weights,
+    )
+    from spotlight.video import FrameStore, MaskStore, write_frame_video
+
+    print("\n多平面重建（双平面合成场景）")
+    work = Path(tempfile.mkdtemp(prefix="spotlight-parallax-"))
+    try:
+        n, w, h = 40, 320, 180
+        rng = np.random.default_rng(11)
+        far = cv2.GaussianBlur(rng.integers(0, 255, (h, w, 3), dtype=np.uint8), (0, 0), 3)
+        near = cv2.GaussianBlur(rng.integers(0, 255, (h // 2, w, 3), dtype=np.uint8), (0, 0), 3)
+        # 光有模糊噪声提不出 ORB 角点，得撒一些矩形块——否则运动估计会整体退化成单位矩阵，
+        # 单平面和多平面都会得到同一张「没对齐」的板，测不出差别。
+        for _ in range(60):
+            x, y = (int(v) for v in rng.integers(0, min(w, h), size=2))
+            cv2.rectangle(far, (x, y), (min(w, x + 22), min(h, y + 22)),
+                          tuple(int(v) for v in rng.integers(0, 255, 3)), -1)
+        for _ in range(30):
+            x, y = (int(v) for v in rng.integers(0, min(w, h // 2), size=2))
+            cv2.rectangle(near, (x, y), (min(w, x + 22), min(h // 2, y + 22)),
+                          tuple(int(v) for v in rng.integers(0, 255, 3)), -1)
+
+        frames, truth, pmasks = [], [], []
+        for i in range(n):
+            t = i / (n - 1)
+            shift_far = 10 * np.sin(t * np.pi)
+            shift_near = 70 * np.sin(t * np.pi)      # 近平面动得多 → 明显的层间视差
+            bg = cv2.warpAffine(far, np.float32([[1, 0, shift_far], [0, 1, 0]]), (w, h),
+                                flags=cv2.INTER_LINEAR)
+            bg[h // 2:] = cv2.warpAffine(
+                near, np.float32([[1, 0, shift_near], [0, 1, 0]]), (w, h // 2),
+                flags=cv2.INTER_LINEAR)
+            frame = bg.copy()
+            pm = np.zeros((h, w), np.uint8)
+            px = int(w * 0.12 + i * 4) % (w + 60) - 30
+            cv2.ellipse(frame, (px, int(h * 0.5)), (12, 26), 0, 0, 360, (250, 30, 30), -1)
+            cv2.ellipse(pm, (px, int(h * 0.5)), (14, 28), 0, 0, 360, 255, -1)
+            frames.append(frame)
+            truth.append(bg)
+            pmasks.append(pm)
+
+        video = work / "parallax.mkv"
+        write_frame_video(iter(frames), video, w, h, "30/1", total=n, encoder="ffv1")
+        store = FrameStore(str(video), work / "f", long_side=None)
+        persons = MaskStore(work / "p.u8", store.n_frames, store.width, store.height)
+        for i, m in enumerate(pmasks):
+            persons.set(i, cv2.resize(m, (store.width, store.height), interpolation=cv2.INTER_NEAREST))
+
+        cfg = CleanConfig(segment=32, window=16, inpaint=False)
+        homographies = _frame_homographies(store, persons, cfg, None)
+        size = (store.width, store.height)
+
+        # 合成深度：下半屏（近）近度高、上半屏（远）近度低
+        depth = []
+        for _ in range(store.n_frames):
+            d = np.full((store.height, store.width), 70, np.uint8)
+            d[store.height // 2:] = 220
+            depth.append(d)
+        planes = 3
+        centers = depth_layer_centers(depth, planes)
+        depth_maps = [
+            [(np.clip(wt, 0.0, 1.0) * 255).astype(np.uint8) for wt in plane_weights(d, centers)]
+            for d in depth
+        ]
+        plane_hs = _plane_homographies(store, persons, depth, cfg, None, centers=centers)
+
+        ref = 20
+
+        def half_error(plates) -> tuple[float, float]:
+            """返回（远半屏误差, 近半屏误差）。视差在近半屏最大。"""
+            import cv2 as _cv2
+
+            rm = PeopleRemover(cfg, None)
+            plate = rm._background_for(ref, plates, homographies, size)
+            tb = _cv2.resize(truth[ref], size)
+            diff = np.abs(plate.astype(np.int16) - tb.astype(np.int16)).mean(axis=2)
+            hh = size[1]
+            return float(diff[: hh // 2].mean()), float(diff[hh // 2:].mean())
+
+        rm1 = PeopleRemover(cfg, None)
+        p1, _ = rm1.build_plates(store, persons, homographies, frame_range=(0, store.n_frames))
+        far1, near1 = half_error(p1)
+
+        rm3 = PeopleRemover(cfg, None)
+        p3, _ = rm3.build_plates(
+            store, persons, homographies, frame_range=(0, store.n_frames),
+            plane_hs=plane_hs, depth_maps=depth_maps, planes=planes,
+        )
+        far3, near3 = half_error(p3)
+
+        check("单平面重建本身可用", 0 < far1 < 40 and 0 < near1 < 40,
+              f"远半 {far1:.2f} / 近半 {near1:.2f} 灰阶")
+        check("多平面在视差最大处更准", near3 < near1,
+              f"近半 多平面 {near3:.2f} vs 单平面 {near1:.2f} 灰阶"
+              f"（改善 {100 * (near1 - near3) / max(near1, 1e-6):.0f}%）")
+        check("多平面整体不劣化", far3 <= far1 + 0.5,
+              f"远半 多平面 {far3:.2f} vs 单平面 {far1:.2f} 灰阶")
+        store.close()
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 def test_estimate() -> None:
     print("\n耗时预估")
     a = estimate_seconds(1000, "balanced")
@@ -377,6 +528,8 @@ def test_estimate() -> None:
 
 def main() -> int:
     test_diffusion_shape()
+    test_depth_blur()
+
     if not Path(SAMPLE).is_file():
         print(f"[SKIP] 找不到测试素材 {SAMPLE}")
         print("✅ 核心测试跳过：0 项")
@@ -389,6 +542,7 @@ def main() -> int:
     test_mask_store()
     test_clean_specks()
     test_cleanplate()
+    test_parallax_planes()
     test_estimate()
     test_cancel()
     test_frame_range()

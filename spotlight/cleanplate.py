@@ -108,6 +108,18 @@ class CleanConfig:
     #: 用来兜住 SAM2 没切到、且在人员掩码里和目标**断开**的部位（典型是头）。
     #: 这是刻意偏保守的：宁可少抹掉一个人，也不能把目标自己弄坏。
     keep_margin: float = 0.2
+    #: 逐层估计单应时的 RANSAC 阈值。必须**比全局的紧**：
+    #: 相邻帧之间不同深度层的位移差往往只有 1~2 像素，
+    #: 用全局那个 3 像素的阈值会把两层判成同一个运动，分层就白做了。
+    plane_ransac_px: float = 1.2
+    #: 深度辅助的**多平面**对齐：把画面按深度分成几层，各层各自用一个单应矩阵。
+    #: 1 = 关闭（只用全局单应，和以前完全一致）。>1 需要深度模型
+    #: （``spotlight download --preset depth``）。
+    #:
+    #: 为什么需要它：单应矩阵只能对齐**一个平面**。走廊、街道这类有纵深的场景，
+    #: 近处和远处的运动不一致（视差），对齐了一处就错开另一处，搬过来的背景就是重影。
+    #: 按深度分层后，每层在自己的平面上对齐，视差被大幅消掉。
+    parallax_planes: int = 3
 
 
 # --------------------------------------------------------------------- LaMa
@@ -243,6 +255,71 @@ def _frame_homographies(
     return homographies
 
 
+def _estimate_depth_layers(
+    store: FrameStore,
+    models_dir: str | Path,
+    cfg: CleanConfig,
+    on_progress: ProgressFn | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+) -> tuple[list[list[np.ndarray]] | None, list[np.ndarray] | None, int, list[float] | None]:
+    """估计逐帧深度，并预先算好每个深度层的权重图。
+
+    返回 ``(depth_maps, nearness, planes, centers)``：
+
+    * ``depth_maps[i]``：第 i 帧的 ``planes`` 张层权重图（``uint8``，和为 255），
+      给累积阶段做逐层融合用；
+    * ``nearness[i]``：第 i 帧的小尺寸近度图（``uint8``），
+      给运动估计阶段把匹配点归层用；
+    * ``centers``：每一层的近度中心，用整段分位数定（见 :func:`depth_layer_centers`）。
+
+    拿不到深度（没下权重 / 模型不可用）时返回 ``(None, None, 1, None)``，
+    调用方会退回单平面——不会因为缺模型就失败。
+
+    权重图按 1/8 分辨率存：层权重是**平滑**的，低分辨率足够，
+    而全分辨率存几百帧会吃掉几百 MB。
+    """
+    planes = max(1, int(cfg.parallax_planes))
+    if planes <= 1:
+        return None, None, 1, None
+    try:
+        from .depth import DepthEstimator, estimate_clip, resolve_depth
+    except Exception:  # noqa: BLE001
+        return None, None, 1, None
+    model = resolve_depth(models_dir)
+    if model is None:
+        if on_progress is not None:
+            on_progress("depth", 0, 1,
+                        "未找到深度模型，改用单平面运动估计（spotlight download --preset depth）")
+        return None, None, 1, None
+    estimator = DepthEstimator(model)
+    if not estimator.available:
+        if on_progress is not None:
+            on_progress("depth", 0, 1,
+                        f"深度模型不可用（{estimator.reason}），改用单平面运动估计")
+        return None, None, 1, None
+
+    _, frames = estimate_clip(
+        estimator, store,
+        step=3,
+        on_progress=lambda *a, **kw: on_progress(*a, **kw) if on_progress else None,
+        should_cancel=should_cancel,
+    )
+    sw = max(8, store.width // 8)
+    sh = max(8, store.height // 8)
+    nearness: list[np.ndarray] = []
+    for f in frames:
+        nearness.append(cv2.resize(f, (sw, sh), interpolation=cv2.INTER_AREA))
+    centers = depth_layer_centers(nearness, planes)
+    depth_maps = [
+        [(np.clip(w, 0.0, 1.0) * 255).astype(np.uint8) for w in plane_weights(d, centers)]
+        for d in nearness
+    ]
+    if on_progress is not None:
+        on_progress("depth", 1, 1,
+                    "深度层中心 " + " / ".join(f"{c:.2f}" for c in centers))
+    return depth_maps, nearness, planes, centers
+
+
 def _accumulate_homography(homographies: list[np.ndarray], src: int, dst: int) -> np.ndarray:
     """把第 ``src`` 帧的坐标系变换到第 ``dst`` 帧。"""
     if src == dst:
@@ -254,6 +331,172 @@ def _accumulate_homography(homographies: list[np.ndarray], src: int, dst: int) -
     else:
         for j in range(dst + 1, src + 1):
             result = np.linalg.inv(homographies[j]) @ result
+    return result
+
+
+# --------------------------------------------------- 深度辅助的多平面运动估计
+
+
+def depth_layer_centers(depths: list[np.ndarray], planes: int) -> list[float]:
+    """用**整段深度的分位数**定每一层的中心（0..1 的近度）。
+
+    为什么不用「0..1 均匀取中心」：真实场景的深度分布很不均匀
+    （往往一大片背景挤在很小的近度区间里）。均匀中心会让好几层的支撑集为空，
+    那些层估不出单应矩阵、只能退回全局——等于白分层。
+    按分位数取中心能保证**每层都有足够多的像素**。
+    """
+    k = max(1, int(planes))
+    if k == 1:
+        return [0.5]
+    if not depths:
+        return list(np.linspace(0.0, 1.0, k))
+    flat = np.concatenate([d.ravel() for d in depths]).astype(np.float32) / 255.0
+    edges = np.quantile(flat, np.linspace(0.0, 1.0, k + 1))
+    centers = [(float(edges[i]) + float(edges[i + 1])) / 2.0 for i in range(k)]
+    # 近乎纯平面时所有分位数会挤在一起，给一点最小间距避免权重全塌到一层
+    for i in range(1, k):
+        if centers[i] - centers[i - 1] < 1e-3:
+            centers[i] = min(1.0, centers[i - 1] + 1e-3)
+    return centers
+
+
+def plane_weights(depth_u8: np.ndarray, centers) -> list[np.ndarray]:
+    """按「近度」把每个像素软分配到若干深度层。
+
+    ``centers`` 可以是一个整数（层数，按 0..1 均匀取中心），
+    也可以是**显式的层中心列表**（推荐——见 :func:`depth_layer_centers`）。
+
+    返回每层一张 float32 权重图，同一像素上权重和恒为 1。
+    用**相邻中心之间的线性过渡**而不是硬阈值：层的边界处两侧各占一部分，
+    避免在交界上出现一条生硬的对齐缝。
+    """
+    if isinstance(centers, (int, np.integer)):
+        k = max(1, int(centers))
+        cs = list(np.linspace(0.0, 1.0, k))
+    else:
+        cs = sorted(float(c) for c in centers)
+        k = len(cs)
+    if k <= 1:
+        return [np.ones(depth_u8.shape, dtype=np.float32)]
+
+    d = depth_u8.astype(np.float32) / 255.0
+    out: list[np.ndarray] = []
+    for i, c in enumerate(cs):
+        left = cs[i - 1] if i > 0 else cs[0] - (cs[1] - cs[0])
+        right = cs[i + 1] if i < k - 1 else cs[-1] + (cs[-1] - cs[-2])
+        w = np.minimum(
+            (d - left) / max(1e-6, c - left),
+            (right - d) / max(1e-6, right - c),
+        )
+        out.append(np.clip(w, 0.0, 1.0).astype(np.float32))
+    total = np.sum(out, axis=0)
+    total[total < 1e-6] = 1.0
+    return [w / total for w in out]
+
+
+def _plane_homographies(
+    store: FrameStore,
+    persons: MaskStore,
+    depths: list[np.ndarray],
+    cfg: CleanConfig,
+    on_progress: ProgressFn | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+    centers: list[float] | None = None,
+) -> list[np.ndarray]:
+    """逐帧估计每个深度层的单应矩阵。
+
+    返回长度 ``n`` 的列表，元素形状 ``(K, 3, 3)``：第 ``i`` 项是「把第 i-1 帧
+    的第 k 层对齐到第 i 帧」的单应矩阵。
+
+    做法：仍然在**没人**的区域提 ORB 特征做匹配，但把每个匹配点按它所在位置的
+    深度权重归到某个层，然后**每层各自 RANSAC**。某层匹配点不够就退回全局单应——
+    层估计不可信时，行为退化成和以前一样，不会更差。
+    """
+    planes = max(1, int(cfg.parallax_planes))
+    cs = np.asarray(centers, dtype=np.float32) if centers else np.linspace(
+        0.0, 1.0, planes, dtype=np.float32
+    )
+    if len(cs) != planes:
+        cs = np.linspace(0.0, 1.0, planes, dtype=np.float32)
+    orb = cv2.ORB_create(cfg.features)
+    matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+    n = store.n_frames
+    out: list[np.ndarray] = [np.repeat(np.eye(3, dtype=np.float64)[None], planes, axis=0)]
+    prev_gray = cv2.cvtColor(store.frame(0), cv2.COLOR_RGB2GRAY)
+    prev_keep = (persons.get(0) < 100).astype(np.uint8) * 255
+    prev_depth = depths[0] if depths else None
+    failures = 0
+
+    for i in range(1, n):
+        if should_cancel is not None and should_cancel():
+            raise CleanError("已取消")
+        cur_gray = cv2.cvtColor(store.frame(i), cv2.COLOR_RGB2GRAY)
+        cur_keep = (persons.get(i) < 100).astype(np.uint8) * 255
+        identity = np.eye(3, dtype=np.float64)
+        layer_h = [identity.copy() for _ in range(planes)]
+        try:
+            k1, d1 = orb.detectAndCompute(prev_gray, prev_keep)
+            k2, d2 = orb.detectAndCompute(cur_gray, cur_keep)
+            if d1 is not None and d2 is not None and len(k1) >= 12 and len(k2) >= 12:
+                matches = matcher.match(d1, d2)
+                if len(matches) >= 12:
+                    p1 = np.float32([k1[m.queryIdx].pt for m in matches]).reshape(-1, 1, 2)
+                    p2 = np.float32([k2[m.trainIdx].pt for m in matches]).reshape(-1, 1, 2)
+                    global_h, _ = cv2.findHomography(p1, p2, cv2.RANSAC, cfg.ransac_px)
+                    if global_h is not None and np.isfinite(global_h).all():
+                        layer_h = [global_h.copy() for _ in range(planes)]
+                        # 按深度把匹配点分组，逐层重新估计
+                        if prev_depth is not None:
+                            hh, ww = prev_depth.shape[:2]
+                            sh, sw = store.height, store.width
+                            pts = p1.reshape(-1, 2)
+                            cols = np.clip((pts[:, 0] * ww / sw).astype(int), 0, ww - 1)
+                            rows = np.clip((pts[:, 1] * hh / sh).astype(int), 0, hh - 1)
+                            level = prev_depth[rows, cols].astype(np.float32) / 255.0
+                            level = np.argmin(
+                                np.abs(level[:, None] - cs[None, :]), axis=1
+                            )
+                            for k in range(planes):
+                                sel = level == k
+                                if int(sel.sum()) < 12:
+                                    continue
+                                hk, _ = cv2.findHomography(
+                                    p1[sel], p2[sel], cv2.RANSAC,
+                                    float(cfg.plane_ransac_px),
+                                )
+                                if hk is not None and np.isfinite(hk).all():
+                                    layer_h[k] = np.asarray(hk, dtype=np.float64)
+                    else:
+                        failures += 1
+                else:
+                    failures += 1
+            else:
+                failures += 1
+        except cv2.error:
+            failures += 1
+        out.append(np.stack(layer_h, axis=0))
+        prev_gray, prev_keep, prev_depth = cur_gray, cur_keep, (depths[i] if depths else None)
+
+    if on_progress is not None:
+        on_progress("motion", n, n,
+                    f"多平面运动估计完成（{planes} 层，{failures} 帧回退全局单应）",
+                    motion_failures=failures)
+    return out
+
+
+def _accumulate_plane_homography(
+    plane_hs: list[np.ndarray], src: int, dst: int, k: int
+) -> np.ndarray:
+    """把第 ``src`` 帧**第 k 层**的坐标系变换到第 ``dst`` 帧。"""
+    if src == dst:
+        return np.eye(3, dtype=np.float64)
+    result = np.eye(3, dtype=np.float64)
+    if src < dst:
+        for j in range(src + 1, dst + 1):
+            result = plane_hs[j][k] @ result
+    else:
+        for j in range(dst + 1, src + 1):
+            result = np.linalg.inv(plane_hs[j][k]) @ result
     return result
 
 
@@ -448,6 +691,9 @@ class PeopleRemover:
         hi: int,
         reference: int | None = None,
         sigma: float | None = None,
+        plane_hs: list[np.ndarray] | None = None,
+        depth_maps: list[np.ndarray] | None = None,
+        planes: int = 1,
     ) -> tuple[np.ndarray, np.ndarray]:
         """把 ``[lo, hi)`` 累积成一张背景板（默认以段中点为参考系）。
 
@@ -465,7 +711,8 @@ class PeopleRemover:
             sigma = max(1.0, (hi - lo) / 4.0)
 
         mean, count = self._accumulate(
-            store, persons, homographies, lo, hi, center, sigma
+            store, persons, homographies, lo, hi, center, sigma,
+            plane_hs=plane_hs, depth_maps=depth_maps, planes=planes,
         )
 
         # 第二步（截尾）：只采信落在初值附近的样本。
@@ -476,6 +723,7 @@ class PeopleRemover:
             mean2, count2 = self._accumulate(
                 store, persons, homographies, lo, hi, center, sigma,
                 estimate=mean, tol=self.cfg.robust_tol,
+                plane_hs=plane_hs, depth_maps=depth_maps, planes=planes,
             )
             stable = count2 >= max(1, self.cfg.min_samples)
             mean[stable] = mean2[stable]
@@ -503,6 +751,9 @@ class PeopleRemover:
         sigma: float,
         estimate: np.ndarray | None = None,
         tol: float = 0.0,
+        plane_hs: list[np.ndarray] | None = None,
+        depth_maps: list[np.ndarray] | None = None,
+        planes: int = 1,
     ) -> tuple[np.ndarray, np.ndarray]:
         """把 ``[lo, hi)`` 的帧对齐到 ``center`` 帧坐标后做时间加权累积。
 
@@ -511,6 +762,10 @@ class PeopleRemover:
 
         第二条很容易漏——``warpPerspective`` 会把画外补成黑色，不排除的话
         这些黑边会被当成有效样本参与平均，整张板就被拉黑了。
+
+        给了 ``plane_hs`` + ``depth_maps`` 时走**多平面**：每个深度层用自己的
+        单应矩阵对齐，再按层的权重融合。单应矩阵只能对齐一个平面，
+        有纵深的场景里这样能把视差造成的错位消掉一大半。
         """
         h, w = store.height, store.width
         acc = np.zeros((h, w, 3), dtype=np.float64)
@@ -522,11 +777,42 @@ class PeopleRemover:
         kernel = (cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (pad * 2 + 1, pad * 2 + 1))
                   if pad > 0 else None)
         trimmed = estimate is not None and tol > 0
+        layered = plane_hs is not None and depth_maps is not None and planes > 1
 
         for i in range(lo, hi):
             H = _accumulate_homography(homographies, i, center)
-            warped = cv2.warpPerspective(store.frame(i), H, (w, h), flags=cv2.INTER_LINEAR)
-            person = cv2.warpPerspective(persons.get(i), H, (w, h), flags=cv2.INTER_NEAREST)
+            frame_i = store.frame(i)
+
+            if layered:
+                # 逐层各自对齐，再按层权重融合；层权重同样要跟着 warp 过去
+                merged = np.zeros((h, w, 3), dtype=np.float32)
+                for k in range(planes):
+                    Hk = _accumulate_plane_homography(plane_hs, i, center, k)
+                    wk = cv2.warpPerspective(
+                        depth_maps[i][k], Hk, (w, h), flags=cv2.INTER_LINEAR
+                    )
+                    if wk.dtype == np.uint8:      # 存储用 uint8 省内存，这里还原成权重
+                        wk = wk.astype(np.float32) / 255.0
+                    img_k = cv2.warpPerspective(
+                        frame_i, Hk, (w, h), flags=cv2.INTER_LINEAR
+                    ).astype(np.float32)
+                    merged += img_k * wk[..., None]
+                warped = np.clip(merged, 0, 255)
+                # 人员掩码按**每一层**都 warp 一遍再取并集——比只用全局单应更保守，
+                # 宁可多排除一点，也不要把「其实有人」的像素当成背景样本。
+                person = np.zeros((h, w), dtype=np.uint8)
+                for k in range(planes):
+                    Hk = _accumulate_plane_homography(plane_hs, i, center, k)
+                    person = np.maximum(person, cv2.warpPerspective(
+                        persons.get(i), Hk, (w, h), flags=cv2.INTER_NEAREST
+                    ))
+                person = np.maximum(person, cv2.warpPerspective(
+                    persons.get(i), H, (w, h), flags=cv2.INTER_NEAREST
+                ))
+            else:
+                warped = cv2.warpPerspective(frame_i, H, (w, h), flags=cv2.INTER_LINEAR)
+                person = cv2.warpPerspective(persons.get(i), H, (w, h), flags=cv2.INTER_NEAREST)
+
             if kernel is not None:
                 person = cv2.dilate(person, kernel)
             inside = cv2.warpPerspective(canvas, H, (w, h), flags=cv2.INTER_NEAREST) == 255
@@ -587,6 +873,9 @@ class PeopleRemover:
         frame_range: tuple[int, int] | None = None,
         on_progress: ProgressFn | None = None,
         should_cancel: Callable[[], bool] | None = None,
+        plane_hs: list[np.ndarray] | None = None,
+        depth_maps: list[np.ndarray] | None = None,
+        planes: int = 1,
     ) -> tuple[list[tuple[int, np.ndarray]], float]:
         """按段建背景板，并顺手补上空洞。
 
@@ -616,6 +905,7 @@ class PeopleRemover:
                 store, persons, homographies,
                 max(0, center - win), min(n, center + win + 1),
                 reference=center, sigma=max(2.0, win / 2.0),
+                plane_hs=plane_hs, depth_maps=depth_maps, planes=planes,
             )
             raw.append([center, plate, holes])
             if on_progress is not None:
@@ -814,9 +1104,23 @@ def remove_people(
                     "elapsed": time.perf_counter() - started, "skipped": True}
 
         homographies = _frame_homographies(store, persons, cfg, on_progress, should_cancel)
+
+        # 深度辅助的多平面对齐（可选）：单应只能对齐一个平面，有纵深的场景里
+        # 视差会让搬过来的背景错位。按深度分层、各层各自对齐能大幅减轻。
+        depth_maps, nearness, planes, centers = _estimate_depth_layers(
+            store, models_dir, cfg, on_progress, should_cancel
+        )
+        plane_hs = None
+        if depth_maps is not None and nearness is not None:
+            plane_hs = _plane_homographies(
+                store, persons, nearness, cfg, on_progress, should_cancel,
+                centers=centers,
+            )
+
         plates, hole_ratio = remover.build_plates(
             store, persons, homographies, frame_range=frame_range,
             on_progress=on_progress, should_cancel=should_cancel,
+            plane_hs=plane_hs, depth_maps=depth_maps, planes=planes,
         )
 
         write_frame_video(

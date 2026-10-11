@@ -114,6 +114,10 @@ class RunConfig:
     #: 是否把除目标外的所有人抹掉（用重建的背景补上）
     remove_others: bool = False
     clean: CleanConfig = field(default_factory=CleanConfig)
+    #: 是否用深度做「真景深」虚化（近处轻、远处重）。需要 depth 权重。
+    depth_blur: bool = False
+    #: 深度估计的抽帧步长（越大越快，深度在时间上变化平缓）
+    depth_step: int = 3
 
 
 @dataclass
@@ -322,6 +326,52 @@ def _normalize_selections(selections) -> list[Selection]:
     return sorted(items, key=lambda s: int(s.frame_idx))
 
 
+def _write_depth_video(
+    cfg: RunConfig,
+    models_dir: str | Path,
+    store: FrameStore,
+    masks: MaskStore,
+    work: Path,
+    on_progress: ProgressFn | None,
+    should_cancel: Callable[[], bool] | None,
+) -> Path | None:
+    """估计深度，写成「模糊层级」灰度视频，供 ffmpeg 做分层景深虚化。
+
+    返回 ``None`` 表示走不了景深（没下权重 / 模型不可用），调用方会回退到
+    原来的全局均匀虚化——景深是可选增强，不该因为它让整条流程失败。
+    """
+    from .depth import DepthEstimator, estimate_clip, resolve_depth, to_blur_level
+
+    model = resolve_depth(models_dir)
+    if model is None:
+        _emit(on_progress, "depth", 0, 1,
+              "未找到深度模型，回退到均匀虚化（可执行 spotlight download --preset depth）")
+        return None
+    estimator = DepthEstimator(model)
+    if not estimator.available:
+        _emit(on_progress, "depth", 0, 1,
+              f"深度模型不可用（{estimator.reason}），回退到均匀虚化")
+        return None
+
+    focus_near, frames = estimate_clip(
+        estimator, store,
+        step=cfg.depth_step,
+        target_masks=masks,
+        on_progress=lambda *a, **kw: _emit(on_progress, *a, **kw),
+        should_cancel=should_cancel,
+    )
+    # 焦平面取目标所在深度；估不出来时用一个「中景偏前」的保守默认值。
+    focus = 0.6 if focus_near is None else float(focus_near)
+    path = work / "depth.mkv"
+    write_mask_video(
+        (to_blur_level(f, focus) for f in frames),
+        path, store.width, store.height, store.info.fps_expr, total=store.n_frames,
+    )
+    _emit(on_progress, "depth", 1, 1,
+          f"景深层级已生成（焦平面近度 {focus:.2f}）")
+    return path
+
+
 def run(
     video_path: str | Path,
     selections: Selection | Sequence[Selection],
@@ -442,6 +492,16 @@ def run(
 
         check_cancel()
 
+        # ---------------------------------------------------------- 深度（可选）
+        # 必须在 store.close() 之前跑——深度估计要逐帧读原图。
+        # 清除旁人模式整段保持清晰，不需要景深，所以那边不跑。
+        depth_path: Path | None = None
+        if cfg.depth_blur and not cfg.remove_others:
+            depth_path = _write_depth_video(
+                cfg, models_dir, store, masks, work, on_progress, should_cancel,
+            )
+            check_cancel()
+
         # 传播结束后帧就不再需要了，提前解除映射，把页缓存还给系统。
         # （帧是只读的 memmap，属于可回收的文件页、不是泄漏，但长视频下
         # 它的体量不小，早点放掉能让后面合成阶段的内存更宽裕。）
@@ -501,13 +561,15 @@ def run(
             check_cancel()
 
             # ------------------------------------------------------ 合成（虚化 + 提亮）
-            _emit(on_progress, "render", 0, 1, "合成并编码（虚化 + 提亮）")
+            _emit(on_progress, "render", 0, 1,
+                  "合成并编码（景深虚化 + 提亮）" if depth_path else "合成并编码（虚化 + 提亮）")
             out_path = Path(out_path)
             out_path.parent.mkdir(parents=True, exist_ok=True)
             render(
                 video_path, mask_path, gate_path, out_path, info,
                 mask_size=(store.width, store.height), params=cfg.effects,
                 encoder=cfg.encoder, quality=cfg.quality, audio=cfg.audio,
+                depth_video=depth_path,
             )
             _emit(on_progress, "render", 1, 1, "完成")
 

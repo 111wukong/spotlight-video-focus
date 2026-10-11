@@ -27,6 +27,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Streamin
 from .appearance import _VISION_OK
 from .cleanplate import CleanConfig, resolve_lama
 from .inpaint_diffusion import resolve_diffusion
+from .depth import resolve_depth
 from .composite import EffectParams
 from .pipeline import (
     Cancelled,
@@ -289,6 +290,7 @@ def create_app(models_dir: Path) -> FastAPI:
             "clean": bool(_VISION_OK),
             "lama": resolve_lama(models_dir) is not None,
             "diffusion": resolve_diffusion(models_dir) is not None,
+            "depth": resolve_depth(models_dir) is not None,
         }
 
     # ---------------------------------------------------------------- 上传
@@ -409,6 +411,7 @@ def create_app(models_dir: Path) -> FastAPI:
             audio=bool(data.get("audio", True)),
             reid=bool(data.get("reid", True)),
             remove_others=bool(data.get("remove_others", False)),
+            depth_blur=bool(data.get("depth_blur", False)),
         )
         if cfg.remove_others:
             cfg.clean = CleanConfig(
@@ -417,6 +420,7 @@ def create_app(models_dir: Path) -> FastAPI:
                 dilate=int(data.get("clean_dilate") or 7),
                 inpaint=bool(data.get("clean_inpaint", True)),
                 inpaint_model=str(data.get("clean_inpaint_model") or "lama"),
+                parallax_planes=int(data.get("clean_planes") or 3),
             )
         if not cfg.reid:
             cfg.guard.identity_floor = -1.0

@@ -366,6 +366,8 @@
           </div>
         </details>
         <div class="section-caption">处理选项</div>
+        <label class="check"><input type="checkbox" id="depthBlur"><span>真景深虚化（近处轻、远处重）</span></label>
+        <div class="hint" id="depthHint" style="margin:-2px 0 10px 28px"></div>
         <label class="check"><input type="checkbox" id="reid" checked><span>身份守卫（防止中途换人）</span></label>
         <label class="check"><input type="checkbox" id="tsmooth" checked><span>掩码时域平滑（减少边缘抖动）</span></label>
         <label class="check"><input type="checkbox" id="audio" checked><span>保留原声</span></label>
@@ -430,6 +432,8 @@ function updateWorkflow(){
     add(st.vision ? '身份守卫已启用' : '身份守卫不可用', st.vision ? 'ok' : 'warn');
     S.diffusion = !!st.diffusion;
     $('inpaintModel').querySelector('option[value="diffusion"]').disabled = !S.diffusion;
+    S.depth = !!st.depth;
+    syncDepthMode();
     if (!st.lama) {
       const cb = $('removePeople');
       if (cb) { cb.disabled = true; cb.checked = false; }
@@ -723,9 +727,29 @@ function syncRemovalMode(){
 $('removePeople').addEventListener('change', e => {
   $('cleanHint').classList.toggle('hide', !e.target.checked);
   syncRemovalMode();
+  syncDepthMode();
   refreshEstimate();
 });
 $('inpaintModel').addEventListener('change', syncRemovalMode);
+function syncDepthMode(){
+  const cb = $('depthBlur');
+  const hint = $('depthHint');
+  // 清除旁人模式整段保持清晰，不做虚化，景深对它没有意义
+  const irrelevant = $('removePeople').checked;
+  cb.disabled = !S.depth || irrelevant;
+  if (irrelevant) cb.checked = false;
+  if (!S.depth) {
+    hint.textContent = '本机尚未下载深度模型，请先在终端执行：python -m spotlight.cli download --preset depth';
+    hint.className = 'hint warn';
+  } else if (irrelevant) {
+    hint.textContent = '清除旁人模式下画面保持清晰，景深虚化不适用。';
+    hint.className = 'hint';
+  } else {
+    hint.textContent = '按深度让背景近处轻、远处重；目标所在平面保持清晰。会多花一点时间做深度估计。';
+    hint.className = 'hint';
+  }
+}
+$('depthBlur').addEventListener('change', () => refreshEstimate());
 syncRemovalMode();
 $('preset').addEventListener('change', e => {
   S.preset = e.target.value;
@@ -773,6 +797,8 @@ function refreshEstimate(){
   let secs = frames / Math.max(0.1, speed) * 1.25;
   // 清除旁人要多跑一遍：人员分割 + 运动估计 + 建板 + LaMa，量级和推理本身相当
   if ($('removePeople').checked) secs += frames * 0.06 + 12;
+  // 景深：深度估计按抽帧跑，约 3 帧一次推理
+  if ($('depthBlur').checked && !$('removePeople').checked) secs += frames / 3 * 0.35;
   const human = secs < 60 ? `约 ${Math.max(1, Math.round(secs))} 秒` : `约 ${Math.floor(secs/60)} 分 ${Math.round(secs%60)} 秒`;
   $('estimateHint').textContent = frames > 0 ? `本次将处理 ${frames} 帧 · ${human}` : '帧范围无效';
   updateRangeHint();
@@ -806,6 +832,7 @@ $('btnRun').onclick = async () => {
         preset: S.preset, effects: effects, reid: $('reid').checked, audio: $('audio').checked,
         remove_others: $('removePeople').checked,
         clean_inpaint_model: $('removePeople').checked ? $('inpaintModel').value : 'lama',
+        depth_blur: $('depthBlur').checked && !$('removePeople').checked,
       })
     });
     S.jid = r.jid;
