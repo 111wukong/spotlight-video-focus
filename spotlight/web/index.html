@@ -1,0 +1,977 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Spotlight · 视频单人聚焦</title>
+<style>
+  :root{
+    --bg:#0b0d11; --panel:#141821; --panel-2:#1b212c; --line:#252d3b;
+    --text:#e7ecf5; --muted:#8a94a7; --dim:#5d6678;
+    --accent:#5b8cff; --accent-2:#7aa2ff; --ok:#3ecf8e; --warn:#ffb454; --err:#ff6b6b;
+    --radius:14px;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{
+    background:radial-gradient(1200px 600px at 20% -10%, #16203a 0%, var(--bg) 55%) no-repeat, var(--bg);
+    color:var(--text); font:14px/1.6 -apple-system,"PingFang SC","Helvetica Neue",Arial,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  a{color:var(--accent-2)}
+  .wrap{max-width:1240px;margin:0 auto;padding:26px 22px 60px}
+
+  header{display:flex;align-items:center;gap:14px;margin-bottom:22px}
+  .logo{
+    width:38px;height:38px;border-radius:11px;flex:none;
+    background:linear-gradient(140deg,var(--accent),#a06bff);
+    display:grid;place-items:center;font-size:19px;
+    box-shadow:0 6px 20px -6px var(--accent);
+  }
+  h1{font-size:19px;margin:0;letter-spacing:.2px}
+  .sub{color:var(--muted);font-size:12.5px;margin-top:1px}
+  .badges{margin-left:auto;display:flex;gap:8px;flex-wrap:wrap}
+  .badge{font-size:11.5px;padding:4px 9px;border-radius:999px;border:1px solid var(--line);color:var(--muted);background:var(--panel)}
+  .badge.ok{color:var(--ok);border-color:#1f4a38;background:#0f2a20}
+  .badge.warn{color:var(--warn);border-color:#4a3a1f;background:#2a2110}
+
+  .grid{display:grid;grid-template-columns:minmax(0,1fr) 344px;gap:20px;align-items:start}
+  @media (max-width:1020px){.grid{grid-template-columns:1fr}}
+
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:16px}
+  .card + .card{margin-top:16px}
+  .card h2{font-size:13px;margin:0 0 12px;color:var(--muted);font-weight:600;letter-spacing:.4px;text-transform:uppercase;display:flex;align-items:center;gap:8px}
+  .step{width:19px;height:19px;border-radius:6px;background:var(--panel-2);border:1px solid var(--line);display:grid;place-items:center;font-size:11px;color:var(--accent-2);font-weight:700;flex:none}
+
+  #drop{
+    border:1.5px dashed var(--line);border-radius:12px;padding:34px 18px;text-align:center;
+    cursor:pointer;transition:.18s;background:var(--panel-2)
+  }
+  #drop:hover,#drop.hot{border-color:var(--accent);background:#182238}
+  #drop .big{font-size:15px;margin-bottom:5px}
+  #drop .small{color:var(--muted);font-size:12.5px}
+
+  .stage-wrap{position:relative;border-radius:12px;overflow:hidden;background:#000;border:1px solid var(--line)}
+  .stage-wrap.split{display:flex;gap:6px;background:transparent;border:0;border-radius:0}
+  .stage-wrap.split > video{flex:1;min-width:0;width:100%;display:block;background:#000;border:1px solid var(--line);border-radius:12px}
+  .stage{position:relative;width:100%;cursor:crosshair;user-select:none;touch-action:none}
+  .stage video,.stage img.layer{position:absolute;inset:0;width:100%;height:100%;display:block}
+  .stage img.layer{pointer-events:none}
+  .stage img.freeze{z-index:3}
+  .stage img.mask{z-index:4}
+  .stage canvas{z-index:5;position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+
+  .toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px}
+  .seg{display:flex;background:var(--panel-2);border:1px solid var(--line);border-radius:10px;padding:3px;gap:2px}
+  .seg button{
+    background:none;border:0;color:var(--muted);font:inherit;font-size:12.5px;
+    padding:6px 13px;border-radius:7px;cursor:pointer;transition:.15s
+  }
+  .seg button.on{background:var(--accent);color:#fff;box-shadow:0 2px 10px -3px var(--accent)}
+  .seg button:not(.on):hover{color:var(--text);background:#222a38}
+  .meta{margin-left:auto;color:var(--muted);font-size:12.5px;font-variant-numeric:tabular-nums}
+  .meta b{color:var(--text);font-weight:600}
+
+  button.btn{
+    background:var(--accent);color:#fff;border:0;border-radius:10px;padding:11px 18px;
+    font:inherit;font-weight:600;cursor:pointer;transition:.15s;white-space:nowrap
+  }
+  button.btn:hover:not(:disabled){background:var(--accent-2)}
+  button.btn:disabled{opacity:.4;cursor:not-allowed}
+  button.btn.ghost{background:var(--panel-2);border:1px solid var(--line);color:var(--text);font-weight:500}
+  button.btn.ghost:hover:not(:disabled){background:#222a38}
+  button.btn.danger{background:#3a1f24;color:#ff9a9a;border:1px solid #5a2b33}
+  button.btn.tiny{padding:6px 12px;font-size:12.5px;border-radius:8px}
+
+  .anchors{display:flex;flex-wrap:wrap;gap:7px;margin-top:11px}
+  .chip{
+    display:inline-flex;align-items:center;gap:7px;background:var(--panel-2);
+    border:1px solid var(--line);border-radius:999px;padding:4px 6px 4px 11px;
+    font-size:12px;color:var(--muted);cursor:pointer
+  }
+  .chip:hover{border-color:var(--accent)}
+  .chip.primary{border-color:#2d4470;background:#162238;color:var(--accent-2)}
+  .chip b{color:var(--text);font-weight:600}
+  .chip button{
+    background:none;border:0;color:var(--dim);cursor:pointer;font-size:14px;line-height:1;
+    padding:2px 5px;border-radius:50%
+  }
+  .chip button:hover{color:var(--err);background:#2a1a1e}
+
+  .field{margin-bottom:13px}
+  .field:last-child{margin-bottom:0}
+  .field label{display:flex;justify-content:space-between;font-size:12.5px;color:var(--muted);margin-bottom:6px}
+  .field label b{color:var(--text);font-weight:600;font-variant-numeric:tabular-nums}
+  input[type=range]{width:100%;-webkit-appearance:none;height:4px;border-radius:3px;background:var(--panel-2);outline:none}
+  input[type=range]::-webkit-slider-thumb{
+    -webkit-appearance:none;width:15px;height:15px;border-radius:50%;
+    background:var(--accent);cursor:pointer;border:2px solid var(--panel);box-shadow:0 0 0 1px var(--accent)
+  }
+  select,input[type=text],input[type=number]{
+    width:100%;background:var(--panel-2);border:1px solid var(--line);color:var(--text);
+    border-radius:9px;padding:9px 11px;font:inherit;font-size:13px;outline:none
+  }
+  select:focus,input[type=text]:focus,input[type=number]:focus{border-color:var(--accent)}
+  .row{display:flex;gap:10px}
+  .row > *{flex:1;min-width:0}
+  .check{display:flex;align-items:center;gap:9px;font-size:13px;color:var(--muted);cursor:pointer;padding:5px 0}
+  .check input{accent-color:var(--accent);width:15px;height:15px;cursor:pointer}
+  .check span{color:var(--text)}
+
+  .bar{height:7px;border-radius:5px;background:var(--panel-2);overflow:hidden;margin:10px 0 8px}
+  .bar > i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--accent),#a06bff);transition:width .25s}
+  .pmsg{font-size:12.5px;color:var(--muted);min-height:19px}
+  .pstats{font-size:12px;color:var(--dim);margin-top:5px;font-variant-numeric:tabular-nums}
+
+  .note{font-size:12.5px;color:var(--muted);background:var(--panel-2);border:1px solid var(--line);border-left:2px solid var(--accent);border-radius:8px;padding:9px 12px;margin-top:12px}
+  .note.err{border-left-color:var(--err);color:#ffb3b3}
+  .note.ok{border-left-color:var(--ok);color:#a7e9c9}
+  .note.warn{border-left-color:var(--warn);color:#ffdca8}
+  .hide{display:none !important}
+  .field.is-disabled{opacity:.35;pointer-events:none;filter:grayscale(.4)}
+  .hint{font-size:12px;color:var(--dim);margin-top:9px;line-height:1.65}
+  .kbd{background:var(--panel-2);border:1px solid var(--line);border-radius:5px;padding:1px 6px;font-size:11.5px;color:var(--muted)}
+
+  /* Focused editing workspace: graphite surfaces, one warm accent, quiet chrome. */
+  :root{
+    --bg:#101214;--panel:#191c1f;--panel-2:#222629;--line:#303639;
+    --text:#f0f1ed;--muted:#a0a8a4;--dim:#737d78;
+    --accent:#e7a85b;--accent-2:#f0bd7f;--ok:#72c89b;--warn:#e7bd70;--err:#ec8177;
+    --radius:12px;
+  }
+  body{background:var(--bg);font-size:14px;line-height:1.55;color-scheme:dark}
+  .wrap{max-width:1440px;padding:24px clamp(16px,3vw,44px) 56px}
+  header{min-height:54px;margin-bottom:22px;padding-bottom:16px;border-bottom:1px solid var(--line)}
+  .logo{width:42px;height:42px;border-radius:12px;background:#292c2b;color:var(--accent);box-shadow:none;border:1px solid #3c413e}
+  h1{font-size:20px;font-weight:680;letter-spacing:-.35px}
+  .sub{font-size:13px;color:var(--muted)}
+  .badge{padding:5px 10px;font-size:12px;background:#1d2122}
+  .badge.ok{color:#a5dfbe;border-color:#31533e;background:#1a2920}
+  .badge.warn{color:#e7c47f;border-color:#5a4829;background:#2a2317}
+  .workflow{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));margin:0 0 24px;padding:0;list-style:none;border:1px solid var(--line);border-radius:12px;background:#171a1b;overflow:hidden}
+  .workflow li{position:relative;display:flex;align-items:center;gap:11px;min-width:0;padding:13px 18px;color:var(--dim);font-size:13px}
+  .workflow li+li{border-left:1px solid var(--line)}
+  .workflow .wf-num{display:grid;place-items:center;width:25px;height:25px;flex:none;border:1px solid #414846;border-radius:50%;font-size:11px;font-weight:700}
+  .workflow .wf-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .workflow li.done{color:#c3ccc6}
+  .workflow li.done .wf-num{border-color:#537862;background:#22362a;color:#a5dfbe}
+  .workflow li.current{background:#25231f;color:var(--text);font-weight:650}
+  .workflow li.current .wf-num{border-color:var(--accent);background:var(--accent);color:#171819}
+  .grid{grid-template-columns:minmax(0,1fr) minmax(300px,360px);gap:18px}
+  .card{padding:20px;background:var(--panel);border-color:#303638;border-radius:13px;box-shadow:0 12px 30px rgba(0,0,0,.12)}
+  .card + .card{margin-top:14px}
+  .card h2{margin-bottom:16px;color:#d7ddd8;font-size:13px;letter-spacing:.08em;text-transform:none}
+  .step{width:22px;height:22px;border-radius:7px;background:#2d302e;border-color:#454a46;color:var(--accent-2)}
+  #drop{position:relative;min-height:142px;padding:30px 18px;background:#202423;border:1px dashed #59615c;border-radius:11px}
+  #drop:hover,#drop.hot,#drop:focus-visible{border-color:var(--accent);background:#282720;outline:none}
+  #drop .big{font-size:15px;font-weight:630;letter-spacing:.01em}
+  #drop .small{font-size:13px;color:var(--muted)}
+  #drop::after{content:'选择视频';display:inline-block;margin-top:15px;padding:7px 14px;border:1px solid #5b503e;border-radius:8px;color:#f3c88f;background:#302a21;font-size:12px;font-weight:650}
+  .stage-wrap{border-color:#373d3e;border-radius:11px;background:#090a0a}
+  .toolbar{gap:9px;margin-top:14px}
+  .seg{background:#222625;border-color:#363d39;border-radius:9px}
+  .seg button{min-height:34px;padding:7px 13px}
+  .seg button.on{background:#d99a4d;color:#181818;box-shadow:none;font-weight:650}
+  .seg button:not(.on):hover{background:#303533}
+  .btn{min-height:40px}
+  button.btn{background:#d99a4d;color:#171819;border-radius:9px;padding:10px 17px;font-weight:680}
+  button.btn:hover:not(:disabled){background:#efb56b}
+  button.btn.ghost{background:#252a28;border-color:#3b423e;color:#e5e9e5}
+  button.btn.ghost:hover:not(:disabled){background:#303633}
+  button.btn.danger{background:#382624;border-color:#68413b;color:#ffaaa0}
+  button.btn.tiny{min-height:34px;padding:6px 11px}
+  .anchors{gap:8px;margin-top:13px}
+  .chip{background:#222725;border-color:#3a413d;color:#bec7c1}
+  .chip.primary{background:#2a2923;border-color:#655239;color:#f0bd7f}
+  .field{margin-bottom:16px}
+  .field label{color:#bbc3bd;font-size:13px}
+  .field label b{color:#f0f1ed}
+  select,input[type=text],input[type=number]{min-height:42px;background:#222625;border-color:#3a423d;border-radius:8px;font-size:14px}
+  select:focus,input[type=text]:focus,input[type=number]:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(231,168,91,.12)}
+  input[type=range]{height:5px;background:#343a36}
+  input[type=range]::-webkit-slider-thumb{width:17px;height:17px;background:var(--accent);border-color:var(--panel);box-shadow:0 0 0 1px var(--accent)}
+  .check{min-height:38px;gap:11px;font-size:13px;color:#c4cbc6}
+  .check input{width:17px;height:17px;accent-color:var(--accent)}
+  .check span{color:#edf0ec}
+  .hint{color:#909994;font-size:12.5px;line-height:1.65}
+  .note{background:#202523;border-color:#3b423e;border-radius:9px;font-size:13px}
+  .note.err{background:#2b201f;color:#ffb3aa}
+  .note.ok{background:#1e2922;color:#aee0bf}
+  .note.warn{background:#2b271d;color:#f1d49b}
+  .bar{height:8px;background:#343a36}
+  .bar>i{background:var(--accent);transition:width .3s ease}
+  .pmsg{color:#e4e9e4;font-size:13px}
+  .pmsg.error{color:#ffaaa0}
+  .pmsg.cancelled{color:#e7c47f}
+  .pstats{color:#929b95}
+  .removal-panel{margin:16px 0 12px;padding:13px 14px 11px;border:1px solid #514635;border-radius:10px;background:#24231f}
+  .removal-panel>.check{margin:-2px 0 4px}
+  .removal-panel .hint{margin-left:28px!important}
+  .removal-panel .field{margin:12px 0 0 28px!important}
+  .removal-panel select{background:#1c201e}
+  .advanced-settings{margin:13px 0 16px;border:1px solid var(--line);border-radius:9px;background:#1d2120}
+  .advanced-settings summary{display:flex;align-items:center;justify-content:space-between;min-height:42px;padding:0 12px;cursor:pointer;color:#d4dad5;font-size:13px;font-weight:620;list-style:none}
+  .advanced-settings summary::-webkit-details-marker{display:none}
+  .advanced-settings summary::after{content:'＋';color:var(--accent-2);font-size:16px}
+  .advanced-settings[open] summary::after{content:'−'}
+  .advanced-settings summary span{margin-left:auto;margin-right:10px;color:var(--dim);font-size:11px;font-weight:450}
+  .advanced-body{padding:4px 12px 12px;border-top:1px solid #303634}
+  .section-caption{margin:18px 0 10px;color:#858f89;font-size:11px;font-weight:700;letter-spacing:.11em;text-transform:uppercase}
+  #cardRun{position:sticky;top:14px}
+  #btnRun{min-height:46px;font-size:14px}
+  #cardInfo{background:#171a1b}
+  a.btn{display:inline-flex;align-items:center;justify-content:center;min-height:40px;padding:9px 15px;border-radius:9px;background:var(--accent);color:#171819;font-weight:680;text-decoration:none}
+  a.btn:hover{background:#efb56b}
+  .about-details{padding:0}
+  .about-details summary{display:flex;align-items:center;justify-content:space-between;gap:12px;cursor:pointer;color:#d7ddd8;font-size:13px;font-weight:650;list-style:none}
+  .about-details summary::-webkit-details-marker{display:none}
+  .about-details summary::after{content:'＋';color:var(--accent-2);font-size:16px}
+  .about-details[open] summary::after{content:'−'}
+  .about-details summary span{margin-left:auto;color:var(--dim);font-size:11px;font-weight:450}
+  .about-details .hint{margin-top:12px!important}
+  button:focus-visible,a:focus-visible,[role=button]:focus-visible{outline:2px solid var(--accent-2);outline-offset:3px}
+  @media(max-width:1020px){.grid{grid-template-columns:1fr}#cardRun{position:static}}
+  @media(max-width:620px){
+    .wrap{padding:16px 12px 36px}header{align-items:flex-start;gap:10px;margin-bottom:16px}.logo{width:36px;height:36px}.badges{gap:5px}.badge{font-size:10px;padding:4px 7px}
+    .workflow{grid-template-columns:repeat(4,minmax(0,1fr));margin-bottom:16px}.workflow li{justify-content:center;padding:10px 4px;gap:5px;flex-direction:column;font-size:11.5px}.workflow .wf-label{white-space:normal;text-align:center;line-height:1.25}.workflow .wf-num{width:23px;height:23px}
+    .card{padding:15px}.card h2{margin-bottom:13px}.toolbar{gap:7px}.meta{width:100%;margin-left:0}.seg button{padding:7px 10px}
+  }
+  @media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;transition:none!important;animation:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="logo">◎</div>
+    <div>
+      <h1>Spotlight</h1>
+      <div class="sub">选中一个人，整段视频只让他清晰</div>
+    </div>
+    <div class="badges" id="badges"></div>
+  </header>
+
+  <nav id="workflow" aria-label="视频处理步骤">
+    <ol class="workflow">
+      <li data-step="upload" aria-current="step"><span class="wf-num">1</span><span class="wf-label">导入视频</span></li>
+      <li data-step="select"><span class="wf-num">2</span><span class="wf-label">选择目标</span></li>
+      <li data-step="settings"><span class="wf-num">3</span><span class="wf-label">设置效果并处理</span></li>
+      <li data-step="result"><span class="wf-num">4</span><span class="wf-label">预览与导出</span></li>
+    </ol>
+  </nav>
+
+  <div class="grid">
+    <div>
+      <div class="card" id="cardUpload">
+        <h2><i class="step">1</i>导入视频</h2>
+        <div id="drop" role="button" tabindex="0" aria-controls="file" aria-label="选择要处理的视频">
+          <div class="big">拖入视频，或点击选择文件</div>
+          <div class="small">MP4、MOV、MKV 等常见格式 · 文件只在本机处理</div>
+        </div>
+        <input type="file" id="file" accept="video/*" class="hide" aria-label="选择视频文件">
+        <div class="note hide" id="uploadNote" role="status" aria-live="polite"></div>
+      </div>
+
+      <div class="card hide" id="cardPick">
+        <h2><i class="step">2</i>在画面上选中目标</h2>
+        <div class="stage-wrap">
+          <div class="stage" id="stage">
+            <video id="video" playsinline preload="metadata"></video>
+            <img class="layer freeze hide" id="freeze" alt="">
+            <img class="layer mask hide" id="mask" alt="">
+            <canvas id="draw"></canvas>
+          </div>
+        </div>
+        <div class="toolbar">
+          <div class="seg" id="modes" role="group" aria-label="目标选择方式">
+            <button type="button" data-mode="point" class="on" aria-pressed="true">点选</button>
+            <button type="button" data-mode="box" aria-pressed="false">框选</button>
+            <button type="button" data-mode="negative" aria-pressed="false">排除</button>
+          </div>
+          <button class="btn ghost tiny" id="btnUndo" disabled>撤销上一个点</button>
+          <button class="btn ghost tiny" id="btnUnfreeze" disabled>继续播放</button>
+          <div class="meta" id="frameMeta">—</div>
+        </div>
+        <div class="anchors" id="anchorList"></div>
+        <div class="hint">
+          拖进度条到目标最清楚的时刻，然后<b>点在人物的身体上</b>（胸口或躯干）——只点头部的话，模型容易只把脸切出来。<br>
+          点歪了就用 <b>排除</b> 在多余的区域点一下修正。<span class="kbd">空格</span> 播放/暂停，
+          <span class="kbd">← →</span> 前后一帧，<span class="kbd">⌘Z</span> 撤销。
+        </div>
+        <div class="note hide" id="pickNote" role="status" aria-live="polite"></div>
+      </div>
+
+      <div class="card hide" id="cardResult">
+        <h2><i class="step">4</i>成片</h2>
+        <div class="seg" id="resultModes" role="group" aria-label="结果预览方式" style="margin-bottom:12px">
+          <button type="button" data-view="result" class="on" aria-pressed="true">成片</button>
+          <button type="button" data-view="original" aria-pressed="false">原片</button>
+          <button type="button" data-view="split" aria-pressed="false">左右对比</button>
+        </div>
+        <div class="stage-wrap" id="resultStage">
+          <video id="originalVideo" playsinline muted class="hide"></video>
+          <video id="resultVideo" controls playsinline></video>
+        </div>
+        <div class="toolbar">
+          <a class="btn" id="btnDownload" download="spotlight.mp4">下载成片</a>
+          <button class="btn ghost" id="btnAgain">换个目标重做</button>
+          <div class="meta" id="resultMeta"></div>
+        </div>
+        <div class="note hide" id="resultNote" role="status" aria-live="polite"></div>
+      </div>
+    </div>
+
+    <div>
+      <div class="card hide" id="cardSettings">
+        <h2><i class="step">3</i>效果与速度</h2>
+
+        <div class="field">
+          <label for="preset">处理档位</label>
+          <select id="preset"></select>
+          <div class="hint" id="presetHint"></div>
+        </div>
+
+        <div class="field">
+          <label for="rangeStart">处理范围（帧）<b id="rangeHint">全片</b></label>
+          <div class="row">
+            <input type="number" id="rangeStart" min="0" step="1" placeholder="起始帧" aria-label="处理起始帧">
+            <input type="number" id="rangeEnd" min="0" step="1" placeholder="结束帧" aria-label="处理结束帧">
+          </div>
+        </div>
+
+        <div class="removal-panel">
+          <label class="check"><input type="checkbox" id="removePeople"><span>清除其他人并重建背景</span></label>
+          <div class="hint hide" id="cleanHint" style="margin:-2px 0 10px 24px">
+            只保留当前选中的目标，旁人会从画面中移除。成片保持清晰；若背景从未露出，模型只能生成近似内容。
+          </div>
+          <div class="field hide" id="inpaintModelField" style="margin:0 0 12px 24px">
+            <label for="inpaintModel">空洞修复方式</label>
+            <select id="inpaintModel">
+              <option value="lama">快速 · LaMa</option>
+              <option value="diffusion" disabled>细节优先 · 扩散模型</option>
+            </select>
+            <div class="hint" id="inpaintModelHint" style="margin-top:6px"></div>
+          </div>
+        </div>
+        <details class="advanced-settings">
+          <summary>精细调节 <span>主体与背景效果</span></summary>
+          <div class="advanced-body">
+        <div class="field bgfx"><label for="blur">背景虚化 <b id="vBlur">26</b></label><input type="range" id="blur" min="4" max="60" step="1" value="26"></div>
+        <div class="field"><label for="brighten">主体提亮 <b id="vBright">0.055</b></label><input type="range" id="brighten" min="0" max="0.2" step="0.005" value="0.055"></div>
+        <div class="field"><label for="contrast">主体对比 <b id="vContrast">1.07</b></label><input type="range" id="contrast" min="0.9" max="1.3" step="0.01" value="1.07"></div>
+        <div class="field bgfx"><label for="glow">柔光强度 <b id="vGlow">0.22</b></label><input type="range" id="glow" min="0" max="0.6" step="0.02" value="0.22"></div>
+        <div class="field"><label for="feather">边缘羽化 <b id="vFeather">3</b></label><input type="range" id="feather" min="0" max="10" step="0.5" value="3"></div>
+        <div class="field bgfx"><label for="bg_dim">背景压暗 <b id="vDim">0.02</b></label><input type="range" id="bg_dim" min="0" max="0.25" step="0.01" value="0.02"></div>
+        <div class="field bgfx"><label for="bg_desat">背景去色 <b id="vDesat">0.12</b></label><input type="range" id="bg_desat" min="0" max="0.8" step="0.02" value="0.12"></div>
+        <div class="field"><label for="sharpen">主体锐化 <b id="vSharp">0.0</b></label><input type="range" id="sharpen" min="0" max="1.5" step="0.1" value="0"></div>
+          </div>
+        </details>
+        <div class="section-caption">处理选项</div>
+        <label class="check"><input type="checkbox" id="reid" checked><span>身份守卫（防止中途换人）</span></label>
+        <label class="check"><input type="checkbox" id="tsmooth" checked><span>掩码时域平滑（减少边缘抖动）</span></label>
+        <label class="check"><input type="checkbox" id="audio" checked><span>保留原声</span></label>
+      </div>
+
+      <div class="card hide" id="cardRun">
+        <div class="hint" style="margin:0 0 10px" id="estimateHint">—</div>
+        <button class="btn" id="btnRun" style="width:100%">开始处理</button>
+        <div class="bar hide" id="barWrap" role="progressbar" aria-label="视频处理进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i id="bar"></i></div>
+        <div class="pmsg" id="pmsg" role="status" aria-live="polite"></div>
+        <div class="pstats" id="pstats"></div>
+        <button class="btn danger hide" id="btnCancel" style="width:100%;margin-top:10px">取消处理</button>
+      </div>
+
+      <div class="card" id="cardInfo">
+        <details class="about-details">
+          <summary>关于 Spotlight <span>本机处理 · Apple Silicon</span></summary>
+          <div class="hint">
+            分割用 SAM 2.1（MLX 原生，跑在 M 系列 GPU 上），合成与编码由 ffmpeg VideoToolbox 完成。<br><br>
+            身份守卫会比对目标外观，降低跟踪中途换人的概率。成片跑偏时，可拖到问题帧补一个修正点再运行。
+          </div>
+        </details>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const api = (p, o) => fetch(p, o).then(async r => {
+  if (!r.ok) { let m = r.statusText; try { m = (await r.json()).detail || m; } catch(e){} throw new Error(m); }
+  return r.json();
+});
+
+const S = {
+  info: null, vid: null, preset: 'balanced', mode: 'point',
+  diffusion: false, anchors: [],
+  frameIdx: 0, frozen: false, busy: false,
+  jid: null, es: null, running: false,
+};
+
+function updateWorkflow(){
+  const resultReady = !$('cardResult').classList.contains('hide');
+  const current = resultReady ? 'result' : !S.info ? 'upload' : !S.anchors.length ? 'select' : 'settings';
+  const order = ['upload','select','settings','result'];
+  const index = order.indexOf(current);
+  document.querySelectorAll('#workflow [data-step]').forEach((el, i) => {
+    el.classList.toggle('current', el.dataset.step === current);
+    el.classList.toggle('done', i < index);
+    if (el.dataset.step === current) el.setAttribute('aria-current','step');
+    else el.removeAttribute('aria-current');
+  });
+}
+
+(async function init(){
+  try {
+    const st = await api('/api/status');
+    const ready = st.presets.filter(p => p.ready);
+    const b = $('badges'); b.innerHTML = '';
+    const add = (t, cls) => { const d = document.createElement('div'); d.className = 'badge ' + (cls||''); d.textContent = t; b.appendChild(d); };
+    add(ready.length ? `${ready.length} 档模型就绪` : '模型未下载', ready.length ? 'ok' : 'warn');
+    add(st.vision ? '身份守卫已启用' : '身份守卫不可用', st.vision ? 'ok' : 'warn');
+    S.diffusion = !!st.diffusion;
+    $('inpaintModel').querySelector('option[value="diffusion"]').disabled = !S.diffusion;
+    if (!st.lama) {
+      const cb = $('removePeople');
+      if (cb) { cb.disabled = true; cb.checked = false; }
+      add('清除旁人需先下 LaMa 模型', 'warn');
+    }
+    S.speeds = {}; S.labels = {};
+    const sel = $('preset');
+    st.presets.forEach(p => {
+      S.speeds[p.key] = p.speed || 2.9;
+      S.labels[p.key] = p.label;
+      const o = document.createElement('option');
+      o.value = p.key; o.textContent = `${p.label} · ${p.image_size}px${p.ready ? '' : '（未下载）'}`;
+      o.disabled = !p.ready; sel.appendChild(o);
+    });
+    S.preset = (ready.find(p => p.key === 'balanced') || ready[0] || {}).key || 'balanced';
+    sel.value = S.preset;
+    S.presetLabel = S.labels[S.preset] || '';
+    if (!ready.length) {
+      showNote('uploadNote', '模型权重尚未就绪。请先下载模型，再刷新页面。', 'err');
+    }
+  } catch(e) {
+    const reason = /failed to fetch|networkerror|load failed/i.test(e.message)
+      ? '本机服务暂时没有响应。请确认 Spotlight 正在运行，然后刷新页面。'
+      : '读取服务状态失败：' + e.message;
+    showTextNote('uploadNote', reason, 'err');
+    const b = $('badges');
+    const d = document.createElement('div'); d.className = 'badge warn'; d.textContent = '服务未连接'; b.appendChild(d);
+  }
+  updatePresetHint();
+  syncRemovalMode();
+  updateWorkflow();
+})();
+
+$('drop').onclick = () => $('file').click();
+$('drop').addEventListener('keydown', e => {
+  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); $('file').click(); }
+});
+$('file').onchange = e => {
+  const f = e.target.files[0];
+  e.target.value = '';
+  if (f) upload(f);
+};
+['dragenter','dragover'].forEach(ev => $('drop').addEventListener(ev, e => { e.preventDefault(); $('drop').classList.add('hot'); }));
+['dragleave','drop'].forEach(ev => $('drop').addEventListener(ev, e => { e.preventDefault(); $('drop').classList.remove('hot'); }));
+$('drop').addEventListener('drop', e => { const f = e.dataTransfer.files[0]; if (f) upload(f); });
+
+async function upload(file){
+  showTextNote('uploadNote', `正在导入 ${file.name}（${(file.size/1e6).toFixed(1)} MB）…`);
+  try {
+    const fd = new FormData(); fd.append('file', file);
+    const r = await api('/api/upload', { method: 'POST', body: fd });
+    S.info = r; S.vid = r.vid; S.anchors = [];
+    $('video').src = `/api/video/${r.vid}`;
+    ['cardPick','cardSettings','cardRun'].forEach(id => $(id).classList.remove('hide'));
+    $('cardResult').classList.add('hide');
+    $('rangeStart').value = ''; $('rangeEnd').value = '';
+    $('rangeStart').placeholder = '0'; $('rangeEnd').placeholder = String(r.n_frames - 1);
+    setStageAspect(); renderAnchors(); clearPreview();
+    hideNote('uploadNote');
+    showNote('pickNote', `已载入 ${r.width}×${r.height} · ${r.fps.toFixed(2)} fps · ${r.n_frames} 帧 · ${r.duration.toFixed(1)} 秒。拖动进度条，找到目标清晰的一帧开始选择。`, 'ok');
+    updateFrameMeta(); refreshEstimate(); updateWorkflow();
+  } catch(e) { showTextNote('uploadNote', '导入失败：' + e.message, 'err'); }
+}
+
+function setStageAspect(){
+  if (!S.info) return;
+  $('stage').style.aspectRatio = `${S.info.width} / ${S.info.height}`;
+}
+const video = $('video');
+video.addEventListener('timeupdate', () => { if (!S.frozen) updateFrameMeta(); });
+video.addEventListener('seeked', () => { if (!S.frozen) updateFrameMeta(); });
+document.addEventListener('keydown', e => {
+  if ($('cardPick').classList.contains('hide') || e.target !== document.body) return;
+  if (e.code === 'Space') { e.preventDefault(); video.paused ? video.play() : video.pause(); }
+  else if (e.code === 'ArrowLeft') { e.preventDefault(); video.pause(); video.currentTime = Math.max(0, video.currentTime - 1/videoFps()); updateFrameMeta(); }
+  else if (e.code === 'ArrowRight') { e.preventDefault(); video.pause(); video.currentTime = Math.min(videoDuration(), video.currentTime + 1/videoFps()); updateFrameMeta(); }
+  else if (e.key === 'z' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); undoLast(); }
+});
+const videoFps = () => (S.info ? S.info.fps : 25);
+const videoDuration = () => (S.info ? S.info.duration : 0);
+
+function updateFrameMeta(){
+  if (!S.info) return;
+  S.frameIdx = Math.min(S.info.n_frames - 1, Math.round(video.currentTime * S.info.fps));
+  $('frameMeta').innerHTML = `第 <b>${S.frameIdx}</b> / ${S.info.n_frames} 帧 · ${video.currentTime.toFixed(2)}s`;
+}
+
+$('modes').addEventListener('click', e => {
+  const btn = e.target.closest('button'); if (!btn) return;
+  [...$('modes').children].forEach(b => {
+    const active = b === btn;
+    b.classList.toggle('on', active);
+    b.setAttribute('aria-pressed', String(active));
+  });
+  S.mode = btn.dataset.mode;
+});
+
+function normFromEvent(e){
+  const r = $('stage').getBoundingClientRect();
+  return [Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)),
+          Math.min(1, Math.max(0, (e.clientY - r.top) / r.height))];
+}
+const anchorAt = f => S.anchors.find(a => a.frame === f);
+function anchorLabel(a){
+  const pos = a.points.filter((_, i) => a.labels[i] === 1).length;
+  const neg = a.points.length - pos;
+  const bits = [];
+  if (a.box) bits.push('框选');
+  if (pos) bits.push(pos + ' 正样本');
+  if (neg) bits.push(neg + ' 排除');
+  return bits.join(' · ') || '—';
+}
+
+let dragStart = null, dragging = false;
+$('stage').addEventListener('pointerdown', e => {
+  if (!S.vid || S.busy || S.running) return;
+  if (S.mode === 'box') { dragStart = normFromEvent(e); dragging = true; $('stage').setPointerCapture(e.pointerId); }
+});
+$('stage').addEventListener('pointermove', e => {
+  if (!dragging) return;
+  const [x, y] = normFromEvent(e);
+  drawBox([Math.min(dragStart[0], x), Math.min(dragStart[1], y), Math.max(dragStart[0], x), Math.max(dragStart[1], y)]);
+});
+$('stage').addEventListener('pointerup', e => {
+  if (!S.vid || S.busy || S.running) return;
+  if (S.mode === 'box' && dragging) {
+    dragging = false;
+    const [x, y] = normFromEvent(e);
+    const box = [Math.min(dragStart[0], x), Math.min(dragStart[1], y), Math.max(dragStart[0], x), Math.max(dragStart[1], y)];
+    clearCanvas();
+    if (box[2] - box[0] > 0.01 && box[3] - box[1] > 0.01) {
+      video.pause();
+      upsertAnchor({ frame: S.frameIdx, points: [], labels: [], box: box });
+      selectTarget();
+    }
+    return;
+  }
+  if (S.mode !== 'box') {
+    const [x, y] = normFromEvent(e);
+    video.pause();
+    const a = anchorAt(S.frameIdx) || { frame: S.frameIdx, points: [], labels: [], box: null };
+    a.box = null;
+    a.points.push([x, y]);
+    a.labels.push(S.mode === 'negative' ? 0 : 1);
+    upsertAnchor(a);
+    selectTarget();
+  }
+});
+
+function upsertAnchor(a){
+  const i = S.anchors.findIndex(x => x.frame === a.frame);
+  if (i >= 0) S.anchors[i] = a; else S.anchors.push(a);
+  S.anchors.sort((p, q) => p.frame - q.frame);
+  renderAnchors();
+}
+function undoLast(){
+  if (!S.anchors.length) return;
+  const a = S.anchors[S.anchors.length - 1];
+  if (a.points.length) { a.points.pop(); a.labels.pop(); }
+  else if (a.box) { a.box = null; }
+  if (!a.points.length && !a.box) S.anchors.splice(S.anchors.indexOf(a), 1);
+  renderAnchors();
+  if (anchorAt(S.frameIdx)) selectTarget(); else clearPreview();
+}
+function renderAnchors(){
+  const box = $('anchorList'); box.innerHTML = '';
+  S.anchors.forEach((a, i) => {
+    const chip = document.createElement('span');
+    chip.className = 'chip' + (i === 0 ? ' primary' : '');
+    const label = document.createElement('span');
+    label.innerHTML = (i === 0 ? '主锚点 ' : '修正 ') + `第 <b>${a.frame}</b> 帧 · ${anchorLabel(a)}`;
+    const del = document.createElement('button');
+    del.type = 'button'; del.textContent = '×'; del.title = '删除这个锚点';
+    del.onclick = ev => { ev.stopPropagation(); S.anchors.splice(i, 1); renderAnchors(); clearPreview(); };
+    chip.append(label, del);
+    chip.onclick = () => {
+      S.frozen = false; $('freeze').classList.add('hide'); $('mask').classList.add('hide');
+      video.currentTime = a.frame / videoFps(); updateFrameMeta();
+    };
+    box.appendChild(chip);
+  });
+  $('btnUndo').disabled = !S.anchors.length;
+  refreshEstimate();
+  updateWorkflow();
+}
+function clearPreview(){
+  $('mask').classList.add('hide'); $('freeze').classList.add('hide'); clearCanvas();
+  S.frozen = false; $('btnUnfreeze').disabled = true;
+  hideNote('pickNote');
+}
+function drawBox(b){
+  const c = $('draw'), r = $('stage').getBoundingClientRect();
+  c.width = r.width; c.height = r.height;
+  const ctx = c.getContext('2d');
+  ctx.clearRect(0, 0, c.width, c.height);
+  ctx.strokeStyle = '#5b8cff'; ctx.lineWidth = 2; ctx.setLineDash([6, 4]);
+  ctx.strokeRect(b[0]*c.width, b[1]*c.height, (b[2]-b[0])*c.width, (b[3]-b[1])*c.height);
+}
+function clearCanvas(){ const c = $('draw'); c.getContext('2d').clearRect(0, 0, c.width, c.height); }
+
+function drawMarkers(a){
+  const c = $('draw'), r = $('stage').getBoundingClientRect();
+  if (c.width !== r.width || c.height !== r.height) { c.width = r.width; c.height = r.height; }
+  const ctx = c.getContext('2d');
+  ctx.clearRect(0, 0, c.width, c.height);
+  if (!a) return;
+  if (a.box) {
+    ctx.strokeStyle = '#5b8cff'; ctx.lineWidth = 2; ctx.setLineDash([6, 4]);
+    ctx.strokeRect(a.box[0]*c.width, a.box[1]*c.height, (a.box[2]-a.box[0])*c.width, (a.box[3]-a.box[1])*c.height);
+    ctx.setLineDash([]);
+  }
+  a.points.forEach((p, i) => {
+    const pos = a.labels[i] === 1;
+    const x = p[0]*c.width, y = p[1]*c.height;
+    ctx.beginPath(); ctx.arc(x, y, 8, 0, Math.PI*2);
+    ctx.fillStyle = pos ? 'rgba(62,207,142,.9)' : 'rgba(255,107,107,.9)';
+    ctx.fill();
+    ctx.lineWidth = 2.5; ctx.strokeStyle = 'rgba(0,0,0,.65)'; ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x-11, y); ctx.lineTo(x+11, y); ctx.moveTo(x, y-11); ctx.lineTo(x, y+11);
+    ctx.lineWidth = 2; ctx.strokeStyle = '#fff'; ctx.stroke();
+  });
+}
+
+async function selectTarget(){
+  if (!S.vid || S.busy || S.running) return;
+  const a = anchorAt(S.frameIdx);
+  if (!a || (!a.points.length && !a.box)) return;
+  S.busy = true;
+  showNote('pickNote', '正在计算抠像…');
+  try {
+    const r = await api('/api/select', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ vid: S.vid, frame_idx: a.frame, points: a.points, labels: a.labels, box: a.box, preset: S.preset })
+    });
+    S.frameIdx = r.frame_idx;
+    $('freeze').src = `/api/frame/${S.vid}/${r.frame_idx}.jpg?w=1280`;
+    $('mask').src = 'data:image/png;base64,' + r.mask_png;
+    $('freeze').classList.remove('hide'); $('mask').classList.remove('hide');
+    S.frozen = true; video.pause();
+    $('btnUnfreeze').disabled = false;
+    drawMarkers(a);
+    updateFrameMeta();
+    if (r.ok) {
+      const pct = (r.area_ratio * 100).toFixed(1);
+      const extra = r.note ? `<br><span style="color:var(--muted)">${escapeHTML(r.note)}</span>` : '';
+      showNote('pickNote', `已锁定目标（占画面 ${pct}%）。满意就点「开始处理」；继续点击可修正。${extra}`, 'ok');
+    } else {
+      showTextNote('pickNote', r.hint || '没分割出有效目标，换个位置再点一次。', 'err');
+    }
+  } catch(e) { showTextNote('pickNote', '计算失败：' + e.message, 'err'); }
+  S.busy = false;
+}
+
+$('btnUndo').onclick = undoLast;
+$('btnUnfreeze').onclick = () => {
+  S.frozen = false;
+  $('freeze').classList.add('hide'); $('mask').classList.add('hide');
+  $('btnUnfreeze').disabled = true;
+  const a = anchorAt(S.frameIdx); if (a) drawMarkers(a); else clearCanvas();
+  video.play();
+};
+
+const sliders = [
+  ['blur','vBlur', v => v], ['brighten','vBright', v => (+v).toFixed(3)],
+  ['contrast','vContrast', v => (+v).toFixed(2)], ['glow','vGlow', v => (+v).toFixed(2)],
+  ['feather','vFeather', v => v], ['bg_dim','vDim', v => (+v).toFixed(2)],
+  ['bg_desat','vDesat', v => (+v).toFixed(2)], ['sharpen','vSharp', v => (+v).toFixed(1)],
+];
+sliders.forEach(([id, out, fmt]) => {
+  const el = $(id);
+  const sync = () => $(out).textContent = fmt(el.value);
+  el.addEventListener('input', sync); sync();
+});
+function syncRemovalMode(){
+  const on = $('removePeople').checked;
+  document.querySelectorAll('.bgfx').forEach(f => f.classList.toggle('is-disabled', on));
+  ['blur','bg_dim','bg_desat','glow'].forEach(id => { $(id).disabled = on; });
+  $('inpaintModelField').classList.toggle('hide', !on);
+  const wantDiff = $('inpaintModel').value === 'diffusion';
+  if (!S.diffusion && wantDiff) $('inpaintModel').value = 'lama';
+  if (on && wantDiff && !S.diffusion) {
+    $('inpaintModelHint').textContent = '本机尚未下载扩散补洞模型，请先在终端执行：python -m spotlight.cli download --preset diffusion';
+    $('inpaintModelHint').className = 'hint warn';
+  } else if (on && wantDiff) {
+    $('inpaintModelHint').textContent = '局部读取空洞周边再生成纹理，细节更充分但更慢；背景一直被遮挡的区域仍只能近似重建。';
+    $('inpaintModelHint').className = 'hint';
+  } else {
+    $('inpaintModelHint').textContent = '';
+  }
+}
+$('removePeople').addEventListener('change', e => {
+  $('cleanHint').classList.toggle('hide', !e.target.checked);
+  syncRemovalMode();
+  refreshEstimate();
+});
+$('inpaintModel').addEventListener('change', syncRemovalMode);
+syncRemovalMode();
+$('preset').addEventListener('change', e => {
+  S.preset = e.target.value;
+  S.presetLabel = (S.labels && S.labels[S.preset]) || '';
+  updatePresetHint();
+  if (S.anchors.length) selectTarget();
+  refreshEstimate();
+});
+['rangeStart','rangeEnd'].forEach(id => $(id).addEventListener('input', () => { updateRangeHint(); refreshEstimate(); }));
+
+function rangeValues(){
+  const s = parseInt($('rangeStart').value, 10);
+  const e = parseInt($('rangeEnd').value, 10);
+  return {
+    frame_start: Number.isFinite(s) ? Math.max(0, s) : null,
+    frame_end: Number.isFinite(e) ? e : null,
+  };
+}
+function updateRangeHint(){
+  if (!S.info) return;
+  const r = rangeValues();
+  if (r.frame_start === null && r.frame_end === null) { $('rangeHint').textContent = '全片'; return; }
+  const a = r.frame_start === null ? 0 : r.frame_start;
+  const b = r.frame_end === null ? S.info.n_frames - 1 : r.frame_end;
+  $('rangeHint').textContent = b > a ? `第 ${a}~${b} 帧` : '范围无效';
+}
+function updatePresetHint(){
+  const txt = {
+    turbo: '极速：最小的模型 + 640 分辨率，约为均衡档的 3 倍速，适合长视频先扫一遍。',
+    fast: '速度优先：推理分辨率 768，比均衡档快约一倍，边缘略粗。',
+    balanced: '均衡：推理分辨率 1024，边缘与速度平衡，日常推荐。',
+    quality: '质量优先：更大的模型 + 全分辨率，边缘最干净，约慢一倍。',
+  };
+  $('presetHint').textContent = txt[S.preset] || '';
+}
+
+function refreshEstimate(){
+  if (!S.vid || !S.info) { $('estimateHint').textContent = '—'; return; }
+  const r = rangeValues();
+  const lo = r.frame_start === null ? 0 : r.frame_start;
+  const hi = r.frame_end === null ? S.info.n_frames : r.frame_end;
+  const frames = Math.max(0, Math.min(S.info.n_frames, hi) - Math.max(0, lo));
+  // 本地估算就够了，不必为了拖动输入框每次都打一次接口
+  const speed = (S.speeds && S.speeds[S.preset]) || 2.9;
+  let secs = frames / Math.max(0.1, speed) * 1.25;
+  // 清除旁人要多跑一遍：人员分割 + 运动估计 + 建板 + LaMa，量级和推理本身相当
+  if ($('removePeople').checked) secs += frames * 0.06 + 12;
+  const human = secs < 60 ? `约 ${Math.max(1, Math.round(secs))} 秒` : `约 ${Math.floor(secs/60)} 分 ${Math.round(secs%60)} 秒`;
+  $('estimateHint').textContent = frames > 0 ? `本次将处理 ${frames} 帧 · ${human}` : '帧范围无效';
+  updateRangeHint();
+}
+
+$('btnRun').onclick = async () => {
+  if (!S.vid) return;
+  if (!S.anchors.length) { showNote('pickNote', '请先在画面上选中目标。', 'err'); return; }
+  const effects = {};
+  sliders.forEach(([id]) => effects[id] = parseFloat($(id).value));
+  effects.temporal_smooth = $('tsmooth').checked;
+  const rng = rangeValues();
+
+  S.running = true;
+  $('btnRun').disabled = true;
+  $('btnCancel').classList.remove('hide');
+  $('barWrap').classList.remove('hide');
+  $('bar').style.width = '0%';
+  $('barWrap').setAttribute('aria-valuenow', '0');
+  $('pmsg').className = 'pmsg';
+  $('pmsg').textContent = '正在提交任务…';
+  $('pstats').textContent = '';
+  $('cardResult').classList.add('hide');
+  updateWorkflow();
+  try {
+    const r = await api('/api/run', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        vid: S.vid, anchors: S.anchors,
+        frame_start: rng.frame_start, frame_end: rng.frame_end,
+        preset: S.preset, effects: effects, reid: $('reid').checked, audio: $('audio').checked,
+        remove_others: $('removePeople').checked,
+        clean_inpaint_model: $('removePeople').checked ? $('inpaintModel').value : 'lama',
+      })
+    });
+    S.jid = r.jid;
+    listen(r.jid);
+  } catch(e) {
+    $('pmsg').textContent = '启动失败：' + e.message;
+    resetRunUI();
+  }
+};
+
+function resetRunUI(){
+  S.running = false;
+  $('btnRun').disabled = false;
+  $('btnCancel').classList.add('hide');
+  updateWorkflow();
+}
+
+function listen(jid){
+  if (S.es) S.es.close();
+  S.es = new EventSource(`/api/progress/${jid}`);
+  const stageName = {
+    decode:'准备视频', load:'加载分割模型', track:'跟踪目标', mask:'生成主体掩码',
+    clean:'识别并移除旁人', people:'分割画面人物', remove:'计算移除区域', motion:'估计镜头运动',
+    plate:'重建背景板', inpaint:'修复背景空洞', compose:'合成画面', render:'编码成片',
+    done:'完成', cancelled:'已取消', error:'处理失败'
+  };
+  S.es.onmessage = ev => {
+    const d = JSON.parse(ev.data);
+    const pct = Math.max(0, Math.min(1, d.fraction || 0));
+    $('bar').style.width = (pct * 100).toFixed(1) + '%';
+    $('barWrap').setAttribute('aria-valuenow', String(Math.round(pct * 100)));
+    $('pmsg').textContent = (stageName[d.stage] || d.stage) + ' · ' + (d.message || '');
+    const extra = [];
+    if (d.done && d.total) extra.push(`${d.done}/${d.total} 帧`);
+    if (d.reanchors) extra.push(`重锚定 ${d.reanchors} 次`);
+    if (d.lost) extra.push(`丢失 ${d.lost} 帧`);
+    $('pstats').textContent = extra.join(' · ');
+
+    if (d.stage === 'done') { S.es.close(); finish(jid, d); }
+    else if (d.stage === 'error') { S.es.close(); fail(d.message); }
+    else if (d.stage === 'cancelled') { S.es.close(); cancelled(); }
+  };
+  S.es.onerror = () => { S.es.close(); pollSummary(jid); };
+}
+
+async function pollSummary(jid){
+  try {
+    const s = await api(`/api/summary/${jid}`);
+    if (s.status === 'done') finish(jid, s);
+    else if (s.status === 'error') fail(s.error);
+    else if (s.status === 'cancelled') cancelled();
+    else setTimeout(() => pollSummary(jid), 1500);
+  } catch(e) { fail(e.message); }
+}
+
+function finish(jid, d){
+  $('bar').style.width = '100%';
+  $('barWrap').setAttribute('aria-valuenow', '100');
+  $('pmsg').className = 'pmsg';
+  $('pmsg').textContent = '处理完成';
+  resetRunUI();
+  $('cardResult').classList.remove('hide');
+  updateWorkflow();
+  const bits0 = [];
+  $('resultVideo').src = `/api/result/${jid}?t=${Date.now()}`;
+  $('originalVideo').src = `/api/video/${S.vid}`;
+  $('btnDownload').href = `/api/result/${jid}`;
+  [...$('resultModes').children].forEach((b, i) => {
+    b.classList.toggle('on', i === 0);
+    b.setAttribute('aria-pressed', String(i === 0));
+  });
+  setResultView('result');
+  const g = d.guard || {};
+  const parts = [`${d.elapsed}s`, `${d.fps} 帧/秒`];
+  if (S.presetLabel) parts.push(S.presetLabel);
+  if (d.anchors > 1) parts.push(`${d.anchors} 个锚点`);
+  if (g.reanchors) parts.push(`重锚定 ${g.reanchors} 次`);
+  $('resultMeta').textContent = parts.join(' · ');
+
+  const cl = d.clean || {};
+  if (cl && cl.coverage) {
+    bits0.push(`已清除旁人：覆盖画面 ${(cl.coverage*100).toFixed(0)}%，其中 ${(cl.hole_ratio*100).toFixed(0)}% 靠模型补全`);
+  }
+  const lost = d.lost_segments || [];
+  const ms = d.mask_stats || {};
+  const bits = [];
+  if (ms.frames_with_mask && d.n_frames) bits.push(`目标出现在 ${ms.frames_with_mask} / ${d.n_frames} 帧里`);
+  if (lost.length) {
+    const spans = lost.slice(0, 4).map(s => `${s.start}~${s.end}`).join('、');
+    bits.push(`有 ${lost.length} 段目标不在画面里（${spans}${lost.length > 4 ? ' …' : ''}），这些片段原样输出、没有虚化`);
+  }
+  const all = bits0.concat(bits);
+  if (all.length) {
+    showNote('resultNote', all.join('。<br>') + (lost.length ? '<br>如果某段其实是跟错了人，回到上面拖到那一帧补一个修正点再跑一次。' : ''), lost.length ? 'warn' : 'ok');
+  } else hideNote('resultNote');
+
+  $('cardResult').scrollIntoView({ behavior:'smooth', block:'nearest' });
+}
+
+function fail(msg){
+  $('pmsg').className = 'pmsg error';
+  $('pmsg').textContent = '处理失败：' + msg;
+  resetRunUI();
+}
+function cancelled(){
+  $('pmsg').className = 'pmsg cancelled';
+  $('pmsg').textContent = '已取消';
+  $('bar').style.width = '0%';
+  $('barWrap').setAttribute('aria-valuenow', '0');
+  resetRunUI();
+}
+
+$('btnCancel').onclick = async () => {
+  if (S.jid) { try { await api(`/api/cancel/${S.jid}`, {method:'POST'}); } catch(e){} }
+  $('pmsg').textContent = '正在取消…';
+};
+$('btnAgain').onclick = () => {
+  $('cardResult').classList.add('hide');
+  $('resultVideo').src = ''; $('originalVideo').src = '';
+  S.anchors = []; renderAnchors(); clearPreview();
+  $('cardPick').scrollIntoView({ behavior:'smooth', block:'center' });
+};
+
+/* 成片视图：成片 / 原片 / 左右对比 */
+$('resultModes').addEventListener('click', e => {
+  const btn = e.target.closest('button'); if (!btn) return;
+  [...$('resultModes').children].forEach(b => {
+    const active = b === btn;
+    b.classList.toggle('on', active);
+    b.setAttribute('aria-pressed', String(active));
+  });
+  setResultView(btn.dataset.view);
+});
+function setResultView(view){
+  const res = $('resultVideo'), orig = $('originalVideo'), wrap = $('resultStage');
+  wrap.classList.toggle('split', view === 'split');
+  orig.classList.toggle('hide', view === 'result');
+  res.classList.toggle('hide', view === 'original');
+  if (view === 'original') { orig.pause(); return; }
+  if (!orig.src) return;
+  orig.currentTime = res.currentTime;
+  if (!res.paused) orig.play().catch(() => {});
+}
+const resultVideoEl = $('resultVideo');
+resultVideoEl.addEventListener('timeupdate', () => {
+  const o = $('originalVideo');
+  if (o.classList.contains('hide') || !o.src) return;
+  // 两路各自解码会慢慢漂移，超过 0.12 秒纠一次，观感上看不出来
+  if (Math.abs(o.currentTime - resultVideoEl.currentTime) > 0.12) o.currentTime = resultVideoEl.currentTime;
+});
+resultVideoEl.addEventListener('play', () => {
+  const o = $('originalVideo');
+  if (!o.classList.contains('hide') && o.src) o.play().catch(() => {});
+});
+resultVideoEl.addEventListener('pause', () => $('originalVideo').pause());
+
+function escapeHTML(value){
+  return String(value).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+}
+function showNote(id, html, kind){
+  const el = $(id); el.className = 'note' + (kind ? ' ' + kind : ''); el.innerHTML = html; el.classList.remove('hide');
+}
+function showTextNote(id, text, kind){
+  const el = $(id); el.className = 'note' + (kind ? ' ' + kind : ''); el.textContent = text; el.classList.remove('hide');
+}
+function hideNote(id){ $(id).classList.add('hide'); }
+</script>
+</body>
+</html>

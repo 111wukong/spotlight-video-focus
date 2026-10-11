@@ -1,0 +1,26 @@
+[project]
+name = "spotlight"
+version = "0.1.0"
+description = "视频单人聚焦：选中一个人，整段视频只让他清晰"
+requires-python = ">=3.14"
+dependencies = [
+    "mlx-sam>=0.3.0",
+    "mlx>=0.32",
+    "numpy>=2.0",
+    "opencv-python>=4.10",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "python-multipart>=0.0.9",
+    "huggingface-hub>=0.24",
+    "pyobjc-framework-Vision>=10.0",
+    "pyobjc-framework-Quartz>=10.0",
+]
+
+[project.scripts]
+spotlight = "spotlight.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["spotlight*"]
+
+[tool.setuptools.package-data]
+spotlight = ["web/*.html"]

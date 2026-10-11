@@ -1,0 +1,7 @@
+.venv/
+models/
+work/
+samples/
+__pycache__/
+*.pyc
+tests/.smoke.html
